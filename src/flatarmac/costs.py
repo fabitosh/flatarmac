@@ -134,6 +134,8 @@ class CostModel:
     free_turn_deg: float = 30.0
     u_turn_s: float = 12.0
     turn_exponent: float = 1.5
+    # Repeating the same stretch gets monotonous: every lap costs this much on top of its corners.
+    lap_s: float = 6.0
 
     def surface_key(self, belagsart: str, rclass: RoadClass) -> str:
         if belagsart == "Natur" and rclass == RoadClass.PATH:

@@ -18,6 +18,7 @@ from pyproj import Transformer
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
+from flatarmac import corridors
 from flatarmac.config import LV95, WGS84, Region
 from flatarmac.costs import MAIN, TRANSIT, CostModel, SurfaceMode, edge_penalty_s
 from flatarmac.pace import Runner, Zone, flat_equivalent_m
@@ -149,7 +150,7 @@ class Suggestion:
     name: str
     lap_m: float
     laps: float
-    main_s: float  # main-block penalty: laps + parts run on the way
+    main_s: float  # main-block penalty: laps (incl. the per-lap cost) + parts run on the way
     warmup_s: float  # incl. the part of the warm-up run on the block
     cooldown_s: float
     warmup_m: float  # distance from start to the block
@@ -187,6 +188,7 @@ class Planner:
                 strict=True,
             )
         )
+        self.turn_graph = corridors.TurnGraph(self.edges, turns, len(self.nodes))
         self.node_xy = shapely.get_coordinates(self.nodes.geometry.values)
         self.node_tree = shapely.STRtree(self.nodes.geometry.values)
         named = self.edges[self.edges["name"].notna()]
@@ -312,7 +314,7 @@ class Planner:
                 lap_s = 2 * (cum_cost[j] - cum_cost[i]) + lap_turn
                 # Best access anywhere on the section: running min of transit over nodes i..j.
                 access = np.minimum.accumulate(transit[i:])[1:]
-                score = lap_s * req.main_m / lap_m + access
+                score = (lap_s + self.model.lap_s) * req.main_m / lap_m + access
                 ok = (stretch >= MIN_STRETCH_M) & (stretch <= req.main_m / 2 * 1.05)
                 band_of = np.digitize(lap_m, LAP_BANDS)
                 for band in np.unique(band_of[ok]):
@@ -324,6 +326,30 @@ class Planner:
                     Block("out_and_back", lap_m, lap_s, lap_turn, nodes[i : j + 1], edges[i:j])
                 )
         return blocks
+
+    def _corridor_blocks(self, req: Request, wu: Transit) -> list[Block]:
+        """Out-and-backs along the most runnable path of half (or a quarter of) the main block,
+        starting around where the warm-up ends. See `corridors`."""
+        targets = [t for t in (req.main_m / 2, req.main_m / 4) if t >= corridors.MIN_ONE_WAY_M]
+        e = self.edges
+        main_cost = edge_penalty_s(e, req.mode, MAIN).to_numpy()
+        per_km = main_cost / np.maximum(e["length_m"].to_numpy(), 1.0) * 1000
+        node_s_per_km = np.full(len(self.nodes), np.inf)
+        np.minimum.at(node_s_per_km, e["u"].to_numpy(), per_km)
+        np.minimum.at(node_s_per_km, e["v"].to_numpy(), per_km)
+        seeds = corridors.seeds(self.node_xy, wu.flat_m, req.warmup_m, node_s_per_km)
+        u_turn = self.model.turn_s(180.0)
+        return [
+            Block(
+                "out_and_back",
+                2 * c.length_m,
+                2 * c.penalty_s + 2 * u_turn,
+                2 * c.turn_s + 2 * u_turn,
+                c.nodes,
+                c.edges,
+            )
+            for c in self.turn_graph.corridors(main_cost, req.easy_pace_s_per_km, seeds, targets)
+        ]
 
     def _track_blocks(self, req: Request) -> list[Block]:
         return [
@@ -419,7 +445,8 @@ class Planner:
         wu_s = wu.leg_s(nodes, req.warmup_m) + easy_per_m * wu.unused_m(nodes, wu_budget)
         cd_s = cd.leg_s(nodes, req.cooldown_m) + easy_per_m * cd.unused_m(nodes, cd_budget)
         # Track connectors (<= 100 m) are ignored in the penalty split.
-        score = np.where(feasible, block.lap_s * laps_m / block.lap_m + wu_s + cd_s, np.inf)
+        per_lap_s = block.lap_s + self.model.lap_s
+        score = np.where(feasible, per_lap_s * laps_m / block.lap_m + wu_s + cd_s, np.inf)
         if not np.isfinite(score).any():
             return None
         best = int(np.argmin(score))
@@ -429,7 +456,7 @@ class Planner:
             name=block.name or "",
             lap_m=float(block.lap_m),
             laps=float(laps_m[best] / block.lap_m),
-            main_s=float(block.lap_s * laps_m[best] / block.lap_m),
+            main_s=float(per_lap_s * laps_m[best] / block.lap_m),
             warmup_s=float(wu_s[best]),
             cooldown_s=float(cd_s[best]),
             warmup_m=float(wu.dist_m[node] + block.access_m),
@@ -515,6 +542,7 @@ class Planner:
         blocks = (
             self._stroke_blocks(req, transit_s)
             + self._cycle_blocks(req, start, limit_s)
+            + self._corridor_blocks(req, wu)
             + self._track_blocks(req)
         )
         easy_edge = edge_penalty_s(self.edges, req.mode, TRANSIT).to_numpy()
