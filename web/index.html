@@ -14,6 +14,7 @@
       --border: #e2e1dd;
       --junction: #eb6834;
       --route: #eb6834;
+      --track: #a43fb5;
       --start: #1f1f1d;
       --error: #d03b3b;
     }
@@ -56,11 +57,13 @@
     .key.laps { border-top: 7px solid var(--route); }
     .key.once { border-top: 3px solid var(--route); }
     .key.transit { border-top: 3px dotted var(--ink); }
+    .key.track { width: 14px; height: 10px; border: 3px solid var(--track); border-radius: 6px; }
     summary { cursor: pointer; font-weight: 600; }
     .route { display: block; width: 100%; text-align: left; border: 1px solid var(--border);
       background: var(--surface); border-radius: 6px; padding: 6px 8px; margin: 0 0 4px;
       cursor: pointer; font: inherit; color: var(--ink); }
     .route[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+    .route.track { border-left: 4px solid var(--track); }
     .route .stats { color: var(--ink-muted); font-variant-numeric: tabular-nums; }
     .route a { color: var(--ink); }
     .maplibregl-popup-content { font: 12px/1.45 system-ui, sans-serif; color: var(--ink); }
@@ -121,6 +124,7 @@
       <p style="margin-top:6px">Runnability score for the main block, 0–100. Darker and thicker is better.</p>
       <div id="legend"></div>
       <div class="legend-row"><span class="dot"></span><span>Junction delay (size = seconds)</span></div>
+      <div class="legend-row"><span class="key track"></span>Running track (always suggested when in reach)</div>
       <div class="legend-row"><span class="key laps"></span>Laps (repeated)</div>
       <div class="legend-row"><span class="key once"></span>Main pace, run once on the way</div>
       <div class="legend-row"><span class="key transit"></span>Warm-up / cool-down</div>
@@ -257,6 +261,8 @@
     // Paths run once sit beside the laps (right-hand side of travel), so they stay visible where
     // they share a street with the block, and out and back show up as two lines.
     const ONCE_OFFSET = 7;
+    const TRACK_COLOR = "#a43fb5";
+    const TRACK_LAYERS = ["tracks", "track-dots"];
     function ensureRouteLayers() {
       if (map.getSource("routes")) return;
       map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -295,7 +301,7 @@
       if (!byRank.size) { box.innerHTML = `<h2>Suggestions</h2><p>No routes found nearby.</p>`; return; }
       const bust = Date.now();
       box.innerHTML = `<h2>Suggestions</h2>` + [...byRank.values()].map((p) => `
-        <button class="route" data-rank="${p.rank}" aria-pressed="false" type="button">
+        <button class="route ${p.kind}" data-rank="${p.rank}" aria-pressed="false" type="button">
           <strong>${p.rank}. ${p.name}</strong>
           <div class="stats">${p.kind.replaceAll("_", " ")} · lap ${p.lap_m} m × ${p.laps}</div>
           <div class="stats">score ${p.score} · climb ${p.climb_m} m · to block ${km(p.warmup_m)} km · total ${km(p.total_m)} km</div>
@@ -345,6 +351,34 @@
           "circle-stroke-width": 2,
         },
       });
+      // Running tracks: rings when zoomed in, dots when zoomed out.
+      const tracks = await (await fetch(dataUrl("tracks"))).json();
+      const centres = tracks.features.map((f) => {
+        const c = f.geometry.coordinates;
+        const mean = (i) => c.reduce((s, p) => s + p[i], 0) / c.length;
+        return { type: "Feature", properties: f.properties, geometry: { type: "Point", coordinates: [mean(0), mean(1)] } };
+      });
+      map.addSource("tracks", { type: "geojson", data: tracks });
+      map.addSource("track-centres", { type: "geojson", data: { type: "FeatureCollection", features: centres } });
+      map.addLayer({
+        id: "tracks-halo", type: "line", source: "tracks", minzoom: 14,
+        layout: { "line-join": "round" },
+        paint: { "line-color": "#ffffff", "line-width": 8 },
+      });
+      map.addLayer({
+        id: "tracks", type: "line", source: "tracks", minzoom: 14,
+        layout: { "line-join": "round" },
+        paint: { "line-color": TRACK_COLOR, "line-width": 4 },
+      });
+      map.addLayer({
+        id: "track-dots", type: "circle", source: "track-centres", maxzoom: 14,
+        paint: {
+          "circle-color": TRACK_COLOR,
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 4, 14, 7],
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 2,
+        },
+      });
       setMode(mode);
       const saved = params.get("routes");
       if (saved) {
@@ -356,6 +390,7 @@
     // --- hover details ---
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "280px" });
     map.on("mousemove", "edges", (e) => {
+      if (map.queryRenderedFeatures(e.point, { layers: TRACK_LAYERS }).length) return;
       map.getCanvas().style.cursor = "crosshair";
       const p = e.features[0].properties;
       const rows = [
@@ -383,7 +418,15 @@
          <table><tr><td>Through delay</td><td class="num">${fmt(p.through_s)} s</td></tr></table>`
       ).addTo(map);
     });
-    for (const layer of ["edges", "junctions"]) {
+    map.on("mousemove", TRACK_LAYERS, (e) => {
+      map.getCanvas().style.cursor = "pointer";
+      const p = e.features[0].properties;
+      popup.setLngLat(e.lngLat).setHTML(
+        `<strong>${p.name}</strong><div class="muted">running track · ${p.surface}</div>
+         <table><tr><td>Lap</td><td class="num">${Math.round(p.lap_m)} m</td></tr></table>`
+      ).addTo(map);
+    });
+    for (const layer of ["edges", "junctions", ...TRACK_LAYERS]) {
       map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; popup.remove(); });
     }
   </script>

@@ -409,9 +409,11 @@ class Planner:
         return f"path near {self.named[self.named_tree.nearest(line.centroid)]}"
 
     def _select(self, scored: list[tuple[Suggestion, Block]], top: int):
-        """Best overall, but with variety: reserve slots per kind and per lap band. Blocks of the
-        same kind and band must be apart; different kinds may share a place."""
+        """Every feasible track, plus the best `top` other blocks with variety: reserve slots per
+        kind and per lap band. Blocks of the same kind and band must be apart."""
         scored = sorted(scored, key=lambda sb: sb[0].score)
+        tracks = [sb for sb in scored if sb[0].kind == "track"]
+        scored = [sb for sb in scored if sb[0].kind != "track"]
         centre = {id(b): self.node_xy[b.nodes].mean(axis=0) for _, b in scored}
         picked: list[tuple[Suggestion, Block]] = []
 
@@ -424,7 +426,7 @@ class Planner:
                 for ps, pb in picked
             )
 
-        quotas = [("kind", k, 2) for k in ("loop", "track", "out_and_back")]
+        quotas = [("kind", k, 2) for k in ("loop", "out_and_back")]
         quotas += [("band", band, 1) for band in ("short", "medium", "long")]
         for attr, value, count in quotas:
             have = sum(getattr(ps, attr) == value for ps, _ in picked)
@@ -437,7 +439,7 @@ class Planner:
         for s, b in scored:
             if fits(s, b):
                 picked.append((s, b))
-        return sorted(picked, key=lambda sb: sb[0].score)
+        return sorted(picked + tracks, key=lambda sb: sb[0].score)
 
     # --- entry point -----------------------------------------------------------------------------
 

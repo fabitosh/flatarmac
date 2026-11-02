@@ -37,7 +37,8 @@ main block, warm-up, cool-down and 5k time, then **Find routes**. Each suggestio
 
 ## Tracks
 
-Running tracks come from the hand-editable list `curated/tracks_<region>.csv` (`lap_m`, `include`,
+Tracks are highlighted on the map, and every track within reach is always suggested on top of
+the `--top` other suggestions. They come from the hand-editable list `curated/tracks_<region>.csv` (`lap_m`, `include`,
 `name`, `surface`). Run `uv run flatarmac build` after editing. To pick up new OSM tracks:
 
 ```bash

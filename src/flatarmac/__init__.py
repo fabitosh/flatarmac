@@ -81,7 +81,12 @@ def main() -> None:
     plan.add_argument("--cooldown", type=float, default=10, help="minutes")
     plan.add_argument("--mode", default="tarmac", choices=["tarmac", "firm_natural"])
     plan.add_argument("--five-k", default="18:13")
-    plan.add_argument("--top", type=int, default=10)
+    plan.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        help="non-track suggestions; feasible tracks are always added",
+    )
     plan.add_argument("--name", default="latest", help="output file name")
 
     serve = commands.add_parser("serve", help="web UI with route planning")

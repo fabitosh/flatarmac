@@ -42,3 +42,10 @@ def export(region: Region) -> None:
     junctions.to_crs(WGS84).to_file(
         web_dir / "junctions.geojson", driver="GeoJSON", COORDINATE_PRECISION=6
     )
+
+    tracks = gpd.read_parquet(region.dir / "tracks.parquet")
+    tracks = tracks[["name", "lap_m", "surface", "osm_type", "osm_id", "geometry"]]
+    tracks = tracks.set_geometry(shapely.force_2d(tracks.geometry.values))
+    tracks.to_crs(WGS84).to_file(
+        web_dir / "tracks.geojson", driver="GeoJSON", COORDINATE_PRECISION=6
+    )
