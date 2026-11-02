@@ -134,7 +134,7 @@ def write(
     rows = []
     for rank, s in enumerate(suggestions, start=1):
         # Warm-up / cool-down not covered by the way there and back is run easy on the block.
-        easy_on_block_m = max(req.warmup_m - s.warmup_m, 0) + max(req.cooldown_m - s.cooldown_m, 0)
+        easy_on_block_m = s.easy_on_block_m
         laps_m = s.laps * s.lap_m
         legs = full_run(s, planner, laps_m + easy_on_block_m)
         main_legs = [legs[k] for k in MAIN_LEGS if k in legs]

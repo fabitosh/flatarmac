@@ -4,6 +4,8 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 
+import numpy as np
+
 
 class Zone(StrEnum):
     EASY = "easy"
@@ -65,6 +67,21 @@ class Runner:
 
     def distance_m(self, duration_s: float, zone: Zone) -> float:
         return duration_s / self.pace_s_per_km(zone) * 1000
+
+
+# Grade-adjusted distance: an easy pace on the flat covers less ground uphill and a little more
+# downhill. Each metre climbed costs about as much as GAP_UP_M of flat running; each metre
+# descended gives back GAP_DOWN_M (steep descents slow you down again, hence the floor).
+GAP_UP_M = 5.0
+GAP_DOWN_M = 1.5
+GAP_MIN_FACTOR = 0.5
+
+
+def flat_equivalent_m(length_m, ascent_m, descent_m):
+    """Distance on the flat that takes as long as running `length_m` with this climb and descent."""
+    return np.maximum(
+        length_m + GAP_UP_M * ascent_m - GAP_DOWN_M * descent_m, GAP_MIN_FACTOR * length_m
+    )
 
 
 def format_pace(s_per_km: float) -> str:

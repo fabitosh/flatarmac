@@ -20,7 +20,7 @@ from scipy.sparse.csgraph import dijkstra
 
 from flatarmac.config import LV95, WGS84, Region
 from flatarmac.costs import MAIN, TRANSIT, CostModel, SurfaceMode, edge_penalty_s
-from flatarmac.pace import Runner, Zone
+from flatarmac.pace import Runner, Zone, flat_equivalent_m
 
 MIN_STRETCH_M = 150.0
 MIN_LOOP_M = 400.0
@@ -39,6 +39,8 @@ def lap_band(lap_m: float) -> str:
 
 @dataclass(frozen=True)
 class Request:
+    """Distances in metres; warm-up / cool-down are flat-equivalent (minutes at easy pace)."""
+
     start: tuple[float, float]  # (lat, lon)
     main_m: float
     warmup_m: float
@@ -87,12 +89,15 @@ def make_request(
 class Transit:
     """Best relaxed-cost paths from one node to every reachable node.
 
-    `legs[budget]` is the penalty of the path to each node when the first `budget` metres are
-    warm-up / cool-down (relaxed weights) and anything beyond is main block (strict weights).
+    Warm-up / cool-down budgets are flat-equivalent metres (minutes at easy pace), compared with
+    `flat_m`, the grade-adjusted distance along the path. `legs[budget]` is the penalty of the path
+    to each node when the first `budget` flat-equivalent metres are warm-up / cool-down (relaxed
+    weights) and anything beyond is main block (strict weights).
     """
 
     source: int
     dist_m: np.ndarray
+    flat_m: np.ndarray
     legs: dict[float, np.ndarray]
     predecessors: np.ndarray
 
@@ -103,7 +108,16 @@ class Transit:
         return nodes[::-1]  # source -> target
 
     def excess_m(self, node, budget_m: float):
-        return np.maximum(self.dist_m[node] - budget_m, 0.0)
+        """Metres of the path beyond the budget (flat-equivalent excess scaled back to ground)."""
+        flat = self.flat_m[node]
+        ratio = np.divide(
+            self.dist_m[node], flat, out=np.ones_like(flat), where=np.isfinite(flat) & (flat > 0)
+        )
+        return np.maximum(flat - budget_m, 0.0) * ratio
+
+    def unused_m(self, node, budget_m: float):
+        """Budget left over on arrival, run on the block instead (flat, so no conversion)."""
+        return np.maximum(budget_m - self.flat_m[node], 0.0)
 
     def leg_s(self, node, budget_m: float):
         return self.legs[budget_m][node]
@@ -142,6 +156,7 @@ class Suggestion:
     cooldown_m: float  # distance from the block to the end
     approach_m: float  # part of the way to the block run as main block
     return_m: float  # part of the way back run as main block
+    easy_on_block_m: float  # warm-up / cool-down the way there and back doesn't cover
     access_node: int
     main_line: shapely.LineString  # one lap (out-and-back: the stretch one way)
     warmup_nodes: list[int] = field(default_factory=list)
@@ -179,6 +194,11 @@ class Planner:
         self.named = named["name"].to_numpy()
         self.to_lv95 = Transformer.from_crs(WGS84, LV95, always_xy=True)
         self.edge_by_pair: dict[tuple[int, int], int] = {}
+        e = self.edges
+        self.edge_u = e["u"].to_numpy()
+        # Flat-equivalent length per direction: u -> v and v -> u.
+        self.flat_fwd = flat_equivalent_m(e["length_m"], e["ascent_m"], e["descent_m"]).to_numpy()
+        self.flat_bwd = flat_equivalent_m(e["length_m"], e["descent_m"], e["ascent_m"]).to_numpy()
 
     # --- graphs ----------------------------------------------------------------------------------
 
@@ -222,9 +242,17 @@ class Planner:
 
     def _transit(self, graph, pair_edge, source, limit_s, relaxed, strict, budgets) -> Transit:
         """Tree from `source`; per budget, penalty with relaxed weights for the first `budget`
-        metres and strict weights beyond (edges straddling the budget are split pro rata)."""
+        flat-equivalent metres and strict weights beyond (edges straddling the budget are split
+        pro rata)."""
         pred, dist, order = self._tree(graph, pair_edge, source, limit_s)
-        length = self.edges["length_m"].to_numpy()
+        flat = np.full(len(dist), np.inf)
+        flat[source] = 0.0
+        step = np.zeros(len(dist))  # flat-equivalent length of the tree edge into each node
+        for node in order[1:]:
+            parent = pred[node]
+            edge = pair_edge[(parent, node)]
+            step[node] = (self.flat_fwd if self.edge_u[edge] == parent else self.flat_bwd)[edge]
+            flat[node] = flat[parent] + step[node]
         legs = {}
         for budget in set(budgets):
             leg = np.full(len(dist), np.inf)
@@ -232,10 +260,10 @@ class Planner:
             for node in order[1:]:
                 parent = pred[node]
                 edge = pair_edge[(parent, node)]
-                beyond = np.clip((dist[node] - budget) / max(length[edge], 1e-9), 0.0, 1.0)
+                beyond = np.clip((flat[node] - budget) / max(step[node], 1e-9), 0.0, 1.0)
                 leg[node] = leg[parent] + (1 - beyond) * relaxed[edge] + beyond * strict[edge]
             legs[budget] = leg
-        return Transit(source, dist, legs, pred)
+        return Transit(source, dist, flat, legs, pred)
 
     def snap(self, lat_lon: tuple[float, float]) -> int:
         x, y = self.to_lv95.transform(lat_lon[1], lat_lon[0])
@@ -388,12 +416,8 @@ class Planner:
         laps_m = np.where(feasible, req.main_m - on_the_way, 0.0)
         # Warm-up / cool-down the way to the block doesn't cover is run on the block.
         easy_per_m = block.easy_s / block.lap_m
-        wu_s = wu.leg_s(nodes, req.warmup_m) + easy_per_m * np.maximum(
-            wu_budget - wu.dist_m[nodes], 0
-        )
-        cd_s = cd.leg_s(nodes, req.cooldown_m) + easy_per_m * np.maximum(
-            cd_budget - cd.dist_m[nodes], 0
-        )
+        wu_s = wu.leg_s(nodes, req.warmup_m) + easy_per_m * wu.unused_m(nodes, wu_budget)
+        cd_s = cd.leg_s(nodes, req.cooldown_m) + easy_per_m * cd.unused_m(nodes, cd_budget)
         # Track connectors (<= 100 m) are ignored in the penalty split.
         score = np.where(feasible, block.lap_s * laps_m / block.lap_m + wu_s + cd_s, np.inf)
         if not np.isfinite(score).any():
@@ -412,6 +436,7 @@ class Planner:
             cooldown_m=float(cd.dist_m[node] + block.access_m),
             approach_m=float(wu.excess_m(node, wu_budget)),
             return_m=float(cd.excess_m(node, cd_budget)),
+            easy_on_block_m=float(wu.unused_m(node, wu_budget) + cd.unused_m(node, cd_budget)),
             access_node=node,
             main_line=block.geometry,  # filled for picked blocks
         )

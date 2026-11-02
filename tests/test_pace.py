@@ -1,6 +1,6 @@
 import pytest
 
-from flatarmac.pace import Runner, Zone, format_pace, parse_duration
+from flatarmac.pace import Runner, Zone, flat_equivalent_m, format_pace, parse_duration
 
 
 def test_parse_duration():
@@ -27,3 +27,12 @@ def test_threshold_pace():
 def test_warmup_distance():
     # 15 min at ~4:55/km easy is roughly 3 km
     assert Runner.from_5k("18:13").distance_m(15 * 60, Zone.EASY) == pytest.approx(3050, abs=60)
+
+
+def test_flat_equivalent_climbs_cost_more_than_descents_give_back():
+    flat = flat_equivalent_m(1000.0, 0.0, 0.0)
+    up = flat_equivalent_m(1000.0, 50.0, 0.0)
+    down = flat_equivalent_m(1000.0, 0.0, 50.0)
+    assert flat == 1000.0
+    assert up - flat > flat - down > 0
+    assert flat_equivalent_m(100.0, 0.0, 100.0) == 50.0  # floor on steep descents
