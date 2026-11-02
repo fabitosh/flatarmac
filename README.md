@@ -45,3 +45,13 @@ the `--top` other suggestions. They come from the hand-editable list `curated/tr
 uv run flatarmac tracks --discover          # query Overpass for leisure=track (needs a built region)
 uv run flatarmac tracks --add relation/123  # add one by OSM id
 ```
+
+## Data and attribution
+
+Nothing downloaded is committed; `fetch` pulls it into `data/`.
+
+- Roads (swissTLM3D), elevation (swissALTI3D) and the base map: © [swisstopo](https://www.swisstopo.admin.ch/),
+  open government data.
+- Stops, crossings and running tracks: © [OpenStreetMap](https://www.openstreetmap.org/copyright)
+  contributors, ODbL. `curated/tracks_<region>.csv` is derived from OpenStreetMap and shared under
+  the same licence.
