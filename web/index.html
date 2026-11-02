@@ -283,6 +283,7 @@
           <strong>${p.rank}. ${p.name}</strong>
           <div class="stats">${p.kind.replaceAll("_", " ")} · lap ${p.lap_m} m × ${p.laps}</div>
           <div class="stats">${p.main_s_per_km} s/km · to block ${km(p.warmup_m)} km · total ${km(p.total_m)} km</div>
+          ${p.on_the_way_m > 0 ? `<div class="stats">${km(p.on_the_way_m)} km of the main block on the way</div>` : ""}
           <a href="${routesDir}/${name}_${p.rank}.gpx?v=${bust}" download="flatarmac_${p.rank}.gpx">GPX</a>
         </button>`).join("");
       box.querySelectorAll(".route").forEach((b) => b.addEventListener("click", (e) => {
@@ -293,8 +294,9 @@
 
     function selectRoute(rank, data) {
       document.querySelectorAll(".route").forEach((b) => b.setAttribute("aria-pressed", String(+b.dataset.rank === rank)));
-      map.setFilter("route-main", ["all", ["==", ["get", "rank"], rank], ["==", ["get", "leg"], "main"]]);
-      map.setFilter("route-transit", ["all", ["==", ["get", "rank"], rank], ["!=", ["get", "leg"], "main"]]);
+      const mainLeg = ["in", ["get", "leg"], ["literal", ["approach", "main", "return"]]];
+      map.setFilter("route-main", ["all", ["==", ["get", "rank"], rank], mainLeg]);
+      map.setFilter("route-transit", ["all", ["==", ["get", "rank"], rank], ["!", mainLeg]]);
       const bounds = new maplibregl.LngLatBounds();
       for (const f of data.features) {
         if (f.properties.rank === rank) f.geometry.coordinates.forEach((c) => bounds.extend([c[0], c[1]]));
