@@ -53,8 +53,9 @@
     .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--junction);
       box-shadow: 0 0 0 2px var(--surface); margin: 0 9px; }
     .key { display: inline-block; width: 22px; height: 0; vertical-align: middle; }
-    .key.main { border-top: 4px solid var(--route); }
-    .key.transit { border-top: 3px dashed var(--ink); }
+    .key.laps { border-top: 7px solid var(--route); }
+    .key.once { border-top: 3px solid var(--route); }
+    .key.transit { border-top: 3px dotted var(--ink); }
     summary { cursor: pointer; font-weight: 600; }
     .route { display: block; width: 100%; text-align: left; border: 1px solid var(--border);
       background: var(--surface); border-radius: 6px; padding: 6px 8px; margin: 0 0 4px;
@@ -120,7 +121,8 @@
       <p style="margin-top:6px">Runnability score for the main block, 0–100. Darker and thicker is better.</p>
       <div id="legend"></div>
       <div class="legend-row"><span class="dot"></span><span>Junction delay (size = seconds)</span></div>
-      <div class="legend-row"><span class="key main"></span>Main block (laps)</div>
+      <div class="legend-row"><span class="key laps"></span>Laps (repeated)</div>
+      <div class="legend-row"><span class="key once"></span>Main pace, run once on the way</div>
       <div class="legend-row"><span class="key transit"></span>Warm-up / cool-down</div>
     </details>
   </div>
@@ -252,18 +254,32 @@
     document.getElementById("go").addEventListener("click", plan);
 
     // --- routes ---
+    // Paths run once sit beside the laps (right-hand side of travel), so they stay visible where
+    // they share a street with the block, and out and back show up as two lines.
+    const ONCE_OFFSET = 7;
     function ensureRouteLayers() {
       if (map.getSource("routes")) return;
       map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addLayer({
         id: "route-transit", type: "line", source: "routes", filter: ["==", ["get", "rank"], -1],
         layout: { "line-cap": "round" },
-        paint: { "line-color": "#1f1f1d", "line-width": 3, "line-dasharray": [1, 2] },
+        paint: { "line-color": "#1f1f1d", "line-width": 3, "line-dasharray": [1, 2], "line-offset": ONCE_OFFSET },
+      });
+      // Width separates the repeated block (thick, haloed) from paths run once (thin).
+      map.addLayer({
+        id: "route-once", type: "line", source: "routes", filter: ["==", ["get", "rank"], -1],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#eb6834", "line-width": 3, "line-offset": ONCE_OFFSET },
       });
       map.addLayer({
-        id: "route-main", type: "line", source: "routes", filter: ["==", ["get", "rank"], -1],
+        id: "route-laps-halo", type: "line", source: "routes", filter: ["==", ["get", "rank"], -1],
         layout: { "line-cap": "round", "line-join": "round" },
-        paint: { "line-color": "#eb6834", "line-width": 6 },
+        paint: { "line-color": "#ffffff", "line-width": 11 },
+      });
+      map.addLayer({
+        id: "route-laps", type: "line", source: "routes", filter: ["==", ["get", "rank"], -1],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#eb6834", "line-width": 7 },
       });
     }
 
@@ -294,9 +310,12 @@
 
     function selectRoute(rank, data) {
       document.querySelectorAll(".route").forEach((b) => b.setAttribute("aria-pressed", String(+b.dataset.rank === rank)));
-      const mainLeg = ["in", ["get", "leg"], ["literal", ["approach", "main", "return"]]];
-      map.setFilter("route-main", ["all", ["==", ["get", "rank"], rank], mainLeg]);
-      map.setFilter("route-transit", ["all", ["==", ["get", "rank"], rank], ["!", mainLeg]]);
+      const ofRank = ["==", ["get", "rank"], rank];
+      const leg = (...names) => ["in", ["get", "leg"], ["literal", names]];
+      map.setFilter("route-laps", ["all", ofRank, leg("main")]);
+      map.setFilter("route-laps-halo", ["all", ofRank, leg("main")]);
+      map.setFilter("route-once", ["all", ofRank, leg("approach", "return")]);
+      map.setFilter("route-transit", ["all", ofRank, leg("warmup", "cooldown")]);
       const bounds = new maplibregl.LngLatBounds();
       for (const f of data.features) {
         if (f.properties.rank === rank) f.geometry.coordinates.forEach((c) => bounds.extend([c[0], c[1]]));
