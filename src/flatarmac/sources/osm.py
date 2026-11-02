@@ -3,6 +3,7 @@
 import geopandas as gpd
 import httpx
 import pandas as pd
+import shapely
 from shapely.geometry import LineString, Point
 
 from flatarmac.config import LV95, WGS84, Region
@@ -39,9 +40,28 @@ def _query(region: Region) -> str:
 out body;
 (
   way["leisure"="track"]({bbox});
+  relation["leisure"="track"]({bbox});
 );
-out geom tags;
+out body geom;
 """
+
+
+def _lap_ring(element: dict) -> LineString | None:
+    """Ring a runner laps. Ways: the way itself. Track relations (multipolygons): the largest
+    inner ring, i.e. the lane-1 kerb; the outer ring only when there is no inner one."""
+    if element["type"] == "way":
+        return LineString([(p["lon"], p["lat"]) for p in element["geometry"]])
+    for role in ("inner", "outer"):
+        lines = [
+            LineString([(p["lon"], p["lat"]) for p in m["geometry"]])
+            for m in element.get("members", [])
+            if m["type"] == "way" and m.get("role") == role and len(m.get("geometry", [])) > 1
+        ]
+        polygons = list(shapely.polygonize(lines).geoms) if lines else []
+        if polygons:
+            # Area in degrees² is fine for picking the largest ring.
+            return max(polygons, key=lambda p: p.area).exterior
+    return None
 
 
 def _overpass(query: str) -> list[dict]:
@@ -74,15 +94,16 @@ def fetch(region: Region) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
 
     track_rows = [
         {
+            "osm_type": e["type"],
             "osm_id": e["id"],
             "sport": e["tags"].get("sport"),
             "surface": e["tags"].get("surface"),
             "access": e["tags"].get("access"),
             "name": e["tags"].get("name"),
-            "geometry": LineString([(p["lon"], p["lat"]) for p in e["geometry"]]),
+            "geometry": ring,
         }
         for e in elements
-        if e["type"] == "way"
+        if e["type"] in ("way", "relation") and (ring := _lap_ring(e)) is not None
     ]
     tracks = gpd.GeoDataFrame(pd.DataFrame(track_rows), crs=WGS84).to_crs(LV95)
 
