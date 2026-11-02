@@ -18,6 +18,7 @@ from scipy.sparse.csgraph import dijkstra
 
 from flatarmac.config import LV95, WGS84, Region
 from flatarmac.costs import TRANSIT, CostModel, SurfaceMode, edge_penalty_s
+from flatarmac.pace import Runner, Zone
 
 MIN_STRETCH_M = 150.0
 EXCESS_TRANSIT_S_PER_KM = 120.0
@@ -34,7 +35,37 @@ class Request:
     easy_pace_s_per_km: float
     mode: SurfaceMode = SurfaceMode.TARMAC
     end: tuple[float, float] | None = None
-    top: int = 5
+    top: int = 10
+
+
+def make_request(
+    start: tuple[float, float],
+    main_value: float,
+    main_unit: str,  # "km" | "m" | "min"
+    warmup_min: float,
+    cooldown_min: float,
+    five_k: str,
+    main_zone: str = "threshold",
+    mode: str = "tarmac",
+    end: tuple[float, float] | None = None,
+    top: int = 10,
+) -> Request:
+    """Request from runner-facing inputs: durations become distances via 5k-derived paces."""
+    runner = Runner.from_5k(five_k)
+    if main_unit == "min":
+        main_m = runner.distance_m(main_value * 60, Zone(main_zone))
+    else:
+        main_m = main_value * (1000 if main_unit == "km" else 1)
+    return Request(
+        start=start,
+        end=end,
+        main_m=main_m,
+        warmup_m=runner.distance_m(warmup_min * 60, Zone.EASY),
+        cooldown_m=runner.distance_m(cooldown_min * 60, Zone.EASY),
+        easy_pace_s_per_km=runner.pace_s_per_km(Zone.EASY),
+        mode=SurfaceMode(mode),
+        top=top,
+    )
 
 
 @dataclass
@@ -210,7 +241,7 @@ class Planner:
             results.append(
                 Suggestion(
                     kind="track",
-                    name=track.name if isinstance(track.name, str) else f"{track.sport} track",
+                    name=track.name,
                     lap_m=track.lap_m,
                     laps=req.main_m / track.lap_m,
                     main_s=lap_s * req.main_m / track.lap_m,
