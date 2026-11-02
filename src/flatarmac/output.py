@@ -12,6 +12,7 @@ from pyproj import Transformer
 from shapely.ops import substring
 
 from flatarmac.config import LV95, WGS84
+from flatarmac.costs import score_0_100
 from flatarmac.planner import Planner, Request, Suggestion
 
 TO_WGS84 = Transformer.from_crs(LV95, WGS84, always_xy=True)
@@ -84,6 +85,9 @@ def _split(line: shapely.LineString | None, at_m: float):
     return head, tail
 
 
+MAIN_LEGS = ("approach", "main", "return")
+
+
 def full_run(s: Suggestion, planner: Planner, block_m: float) -> dict[str, shapely.LineString]:
     """Legs in running order. `approach` / `return` are the parts of the way to and from the block
     that belong to the main block because the block is beyond warm-up / cool-down reach."""
@@ -101,6 +105,22 @@ def full_run(s: Suggestion, planner: Planner, block_m: float) -> dict[str, shape
     return {k: v for k, v in legs.items() if v is not None}
 
 
+def route_score(s: Suggestion, req: Request) -> float:
+    """0-100 display score from the ranking penalty spread over the whole run. Every suggestion
+    covers the same total distance, so this keeps the ranking order."""
+    return float(score_0_100(s.score / (req.total_m / 1000)))
+
+
+def ascent_m(lines) -> float:
+    """Metres climbed along lines (TLM Z follows bridges and underpasses)."""
+    return float(
+        sum(
+            np.clip(np.diff(shapely.get_coordinates(line, include_z=True)[:, 2]), 0, None).sum()
+            for line in lines
+        )
+    )
+
+
 def _to_wgs84(line: shapely.LineString) -> shapely.LineString:
     coords = shapely.get_coordinates(line, include_z=True)
     lon, lat = TO_WGS84.transform(coords[:, 0], coords[:, 1])
@@ -111,7 +131,6 @@ def write(
     suggestions: list[Suggestion], planner: Planner, req: Request, out_dir: Path, name: str
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    main_m = req.main_m
     rows = []
     for rank, s in enumerate(suggestions, start=1):
         # Warm-up / cool-down not covered by the way there and back is run easy on the block.
@@ -124,13 +143,14 @@ def write(
             "name": s.name,
             "lap_m": round(s.lap_m),
             "laps": round(s.laps, 1),
-            "main_s_per_km": round(s.main_s / (main_m / 1000), 1),
+            "climb_m": round(ascent_m(legs[k] for k in MAIN_LEGS if k in legs)),
             "warmup_m": round(s.warmup_m),
             "cooldown_m": round(s.cooldown_m),
             "on_the_way_m": round(s.approach_m + s.return_m),
             "easy_on_block_m": round(easy_on_block_m),
             "total_m": round(s.warmup_m + s.cooldown_m + laps_m + easy_on_block_m),
-            "score": round(s.score, 1),
+            "score": round(route_score(s, req)),
+            "penalty_s": round(s.score, 1),
         }
         for leg, line in legs.items():
             rows.append({**props, "leg": leg, "geometry": line})

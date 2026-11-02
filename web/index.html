@@ -117,7 +117,7 @@
 
     <details>
       <summary>Map legend</summary>
-      <p style="margin-top:6px">Main-block penalty per km. Darker and thicker is better.</p>
+      <p style="margin-top:6px">Runnability score for the main block, 0–100. Darker and thicker is better.</p>
       <div id="legend"></div>
       <div class="legend-row"><span class="dot"></span><span>Junction delay (size = seconds)</span></div>
       <div class="legend-row"><span class="key main"></span>Main block (laps)</div>
@@ -132,20 +132,20 @@
     const km = (m) => (m / 1000).toFixed(1);
     const fmt = (v) => (v == null ? "–" : Number(v).toFixed(1));
 
-    // Sequential blue, dark = low penalty (good). Upper bounds in s/km.
+    // Sequential blue, dark = high score (good). Lower bounds of the 0–100 score, best first.
     const BINS = [
-      { max: 5, color: "#0d366b", width: 4, label: "< 5 s/km" },
-      { max: 15, color: "#1c5cab", width: 3, label: "5–15" },
-      { max: 40, color: "#3987e5", width: 2.2, label: "15–40" },
-      { max: 100, color: "#86b6ef", width: 1.5, label: "40–100" },
-      { max: Infinity, color: "#cde2fb", width: 1, label: "> 100" },
+      { min: 90, color: "#0d366b", width: 4, label: "90–100" },
+      { min: 75, color: "#1c5cab", width: 3, label: "75–90" },
+      { min: 50, color: "#3987e5", width: 2.2, label: "50–75" },
+      { min: 25, color: "#86b6ef", width: 1.5, label: "25–50" },
+      { min: 0, color: "#cde2fb", width: 1, label: "< 25" },
     ];
     document.getElementById("legend").innerHTML = BINS.map((b) =>
       `<div class="legend-row"><span class="swatch" style="height:${b.width}px;background:${b.color}"></span>${b.label}</div>`
     ).join("");
     const step = (prop, key) => {
-      const expr = ["step", ["get", prop], BINS[0][key]];
-      BINS.slice(0, -1).forEach((b, i) => expr.push(b.max, BINS[i + 1][key]));
+      const expr = ["step", ["get", prop], BINS.at(-1)[key]];
+      BINS.slice(0, -1).reverse().forEach((b) => expr.push(b.min, b[key]));
       return expr;
     };
 
@@ -165,10 +165,10 @@
       document.querySelectorAll("[data-mode]").forEach((b) =>
         b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
       if (!map.getLayer("edges")) return;
-      const prop = `s_per_km_${mode}`;
+      const prop = `score_${mode}`;
       map.setPaintProperty("edges", "line-color", step(prop, "color"));
       map.setPaintProperty("edges", "line-width", step(prop, "width"));
-      map.setLayoutProperty("edges", "line-sort-key", ["-", 0, ["get", prop]]);
+      map.setLayoutProperty("edges", "line-sort-key", ["get", prop]);
     };
     document.querySelectorAll("[data-mode]").forEach((b) =>
       b.addEventListener("click", () => setMode(b.dataset.mode)));
@@ -282,7 +282,7 @@
         <button class="route" data-rank="${p.rank}" aria-pressed="false" type="button">
           <strong>${p.rank}. ${p.name}</strong>
           <div class="stats">${p.kind.replaceAll("_", " ")} · lap ${p.lap_m} m × ${p.laps}</div>
-          <div class="stats">${p.main_s_per_km} s/km · to block ${km(p.warmup_m)} km · total ${km(p.total_m)} km</div>
+          <div class="stats">score ${p.score} · climb ${p.climb_m} m · to block ${km(p.warmup_m)} km · total ${km(p.total_m)} km</div>
           ${p.on_the_way_m > 0 ? `<div class="stats">${km(p.on_the_way_m)} km of the main block on the way</div>` : ""}
           <a href="${routesDir}/${name}_${p.rank}.gpx?v=${bust}" download="flatarmac_${p.rank}.gpx">GPX</a>
         </button>`).join("");
@@ -340,10 +340,11 @@
       map.getCanvas().style.cursor = "crosshair";
       const p = e.features[0].properties;
       const rows = [
-        ["Penalty", `${fmt(p[`s_per_km_${mode}`])} s/km`],
+        ["Score", `${p[`score_${mode}`]} / 100`],
         ["Length", `${fmt(p.length_m)} m`],
         ["Ascent", `${fmt(p.ascent_m)} m`],
         ["Max grade", `${fmt(p.max_grade_pct)} %`],
+        ["Penalty, seconds", ""],
         ["Gradient", `${fmt(p.gradient_s)} s`],
         ["Surface", `${fmt(p[`surface_s_${mode}`])} s`],
         ["Traffic", `${fmt(p.traffic_s)} s`],

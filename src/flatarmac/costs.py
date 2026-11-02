@@ -169,3 +169,13 @@ def edge_penalty_s(edges, mode: SurfaceMode, weights: PhaseWeights, include_stop
     if include_stops:
         total = total + weights.stops * edges["stops_s"]
     return total
+
+
+# Display only: penalties stay in seconds internally. 100 = no penalty at all; the score halves
+# at SCORE_HALF_S_PER_KM and keeps falling (never reaching 0) beyond it.
+SCORE_HALF_S_PER_KM = 50.0
+
+
+def score_0_100(s_per_km):
+    """Runnability score from penalty seconds per km."""
+    return 100.0 / (1.0 + np.maximum(s_per_km, 0.0) / SCORE_HALF_S_PER_KM)

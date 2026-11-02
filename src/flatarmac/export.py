@@ -4,7 +4,7 @@ import geopandas as gpd
 import shapely
 
 from flatarmac.config import WGS84, Region
-from flatarmac.costs import MAIN, SurfaceMode, edge_penalty_s
+from flatarmac.costs import MAIN, SurfaceMode, edge_penalty_s, score_0_100
 
 MIN_NODE_S = 2.0
 
@@ -28,7 +28,9 @@ def export(region: Region) -> None:
         out[column] = edges[column].round(1)
     for mode in SurfaceMode:
         out[f"surface_s_{mode}"] = edges[f"surface_s_{mode}"].round(1)
-        out[f"s_per_km_{mode}"] = (main_block_s(edges, mode) / km).round(1)
+        s_per_km = main_block_s(edges, mode) / km
+        out[f"s_per_km_{mode}"] = s_per_km.round(1)
+        out[f"score_{mode}"] = score_0_100(s_per_km).round()
     out = gpd.GeoDataFrame(out, geometry=shapely.force_2d(edges.geometry.values), crs=edges.crs)
 
     junctions = nodes[(nodes["through_s"] >= MIN_NODE_S) | (nodes["control"] == "signal")]

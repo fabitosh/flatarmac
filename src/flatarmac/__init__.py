@@ -24,7 +24,7 @@ def _osm_ref(text: str) -> tuple[str, int]:
 
 
 def _plan(args, region) -> None:
-    from flatarmac.output import write
+    from flatarmac.output import route_score, write
     from flatarmac.pace import format_pace
     from flatarmac.planner import Planner, make_request
 
@@ -45,18 +45,16 @@ def _plan(args, region) -> None:
     suggestions = planner.plan(request)
     path = write(suggestions, planner, request, region.dir / "routes", args.name)
 
-    main_km = request.main_m / 1000
     print(
-        f"main {main_km:.1f} km · warm-up {request.warmup_m / 1000:.1f} km · "
+        f"main {request.main_m / 1000:.1f} km · warm-up {request.warmup_m / 1000:.1f} km · "
         f"cool-down {request.cooldown_m / 1000:.1f} km · "
         f"easy {format_pace(request.easy_pace_s_per_km)}"
     )
     for rank, s in enumerate(suggestions, start=1):
         print(
             f"{rank}. {s.name} [{s.kind}] lap {s.lap_m:.0f} m × {s.laps:.1f} · "
-            f"main {s.main_s / main_km:.1f} s/km · "
             f"to block {s.warmup_m / 1000:.1f} km, back {s.cooldown_m / 1000:.1f} km · "
-            f"score {s.score:.0f}"
+            f"score {route_score(s, request):.0f} ({s.score:.0f} s)"
         )
     print(f"written: {path} (+ GPX per suggestion)")
 

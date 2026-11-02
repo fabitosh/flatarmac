@@ -47,6 +47,10 @@ class Request:
     end: tuple[float, float] | None = None
     top: int = 10
 
+    @property
+    def total_m(self) -> float:
+        return self.warmup_m + self.main_m + self.cooldown_m
+
 
 def make_request(
     start: tuple[float, float],
