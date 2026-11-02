@@ -155,7 +155,7 @@ class PhaseWeights:
 
 
 MAIN = PhaseWeights()
-TRANSIT = PhaseWeights(gradient=0.15, stops=0.35, surface=0.5, traffic=0.5, obstacles=0.3)
+TRANSIT = PhaseWeights(gradient=0.03, stops=0.35, surface=0.5, traffic=0.5, obstacles=0.3)
 
 
 def edge_penalty_s(edges, mode: SurfaceMode, weights: PhaseWeights, include_stops: bool = True):
