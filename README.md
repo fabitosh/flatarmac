@@ -13,6 +13,19 @@ uv run flatarmac export --region zurich  # GeoJSON for the web map
 
 Outputs land in `data/<region>/` (git-ignored): `edges.parquet`, `nodes.parquet`, `turns.parquet`.
 
+## Route suggestions
+
+```bash
+uv run flatarmac plan --start 47.3779,8.5403 --main 8km --warmup 15 --cooldown 10 --name hb
+uv run flatarmac plan --start 47.3913,8.4889 --main 25min --main-zone threshold --name altstetten
+uv run flatarmac plan --start 47.3667,8.5650 --mode firm_natural --name hottingen
+```
+
+Durations are converted with paces from `--five-k` (default 18:13). Warm-up/cool-down are routed with
+relaxed penalties; whatever the way to the block doesn't cover is run easy on the block itself.
+Results go to `data/<region>/routes/<name>.geojson` plus one GPX per suggestion; view them at
+`web/index.html?routes=<name>`.
+
 ## Map
 
 ```bash
