@@ -116,9 +116,12 @@ def write(
             rows.append({**props, "leg": leg, "geometry": line})
         _write_gpx(out_dir / f"{name}_{rank}.gpx", f"{name} #{rank}: {s.name}", legs)
 
-    frame = gpd.GeoDataFrame(rows, crs=LV95).to_crs(WGS84)
     path = out_dir / f"{name}.geojson"
-    frame.to_file(path, driver="GeoJSON", COORDINATE_PRECISION=6)
+    if rows:
+        frame = gpd.GeoDataFrame(rows, crs=LV95).to_crs(WGS84)
+        frame.to_file(path, driver="GeoJSON", COORDINATE_PRECISION=6)
+    else:
+        path.write_text(json.dumps({"type": "FeatureCollection", "features": []}))
     (out_dir / "index.json").write_text(
         json.dumps(sorted(p.stem for p in out_dir.glob("*.geojson")))
     )
