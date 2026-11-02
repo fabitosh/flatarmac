@@ -28,22 +28,24 @@ STOP_NODE_FILTERS = [
 NODE_TAGS = ["highway", "crossing", "crossing:signals", "railway", "barrier", "access", "foot"]
 
 
-def _query(region: Region) -> str:
+def _bbox(region: Region) -> str:
     west, south, east, north = region.bbox_wgs84
-    bbox = f"{south},{west},{north},{east}"
-    nodes = "\n".join(f"  node{f}({bbox});" for f in STOP_NODE_FILTERS)
-    return f"""
-[out:json][timeout:180];
-(
-{nodes}
-);
-out body;
+    return f"{south},{west},{north},{east}"
+
+
+def _stops_query(region: Region) -> str:
+    nodes = "\n".join(f"  node{f}({_bbox(region)});" for f in STOP_NODE_FILTERS)
+    return f"[out:json][timeout:180];\n(\n{nodes}\n);\nout body;"
+
+
+def _tracks_query(region: Region) -> str:
+    bbox = _bbox(region)
+    return f"""[out:json][timeout:120];
 (
   way["leisure"="track"]({bbox});
   relation["leisure"="track"]({bbox});
 );
-out body geom;
-"""
+out body geom;"""
 
 
 def _lap_ring(element: dict) -> LineString | None:
@@ -78,20 +80,23 @@ def _overpass(query: str) -> list[dict]:
     raise RuntimeError("all Overpass endpoints failed:\n" + "\n".join(errors))
 
 
-def fetch(region: Region) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    elements = _overpass(_query(region))
-
+def fetch_stops(region: Region) -> gpd.GeoDataFrame:
     node_rows = [
         {
             "osm_id": e["id"],
             **{t: e["tags"].get(t) for t in NODE_TAGS},
             "geometry": Point(e["lon"], e["lat"]),
         }
-        for e in elements
+        for e in _overpass(_stops_query(region))
         if e["type"] == "node"
     ]
     stops = gpd.GeoDataFrame(pd.DataFrame(node_rows), crs=WGS84).to_crs(LV95)
+    region.dir.mkdir(parents=True, exist_ok=True)
+    stops.to_parquet(region.dir / "osm_stops.parquet")
+    return stops
 
+
+def fetch_tracks(region: Region) -> gpd.GeoDataFrame:
     track_rows = [
         {
             "osm_type": e["type"],
@@ -100,14 +105,18 @@ def fetch(region: Region) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
             "surface": e["tags"].get("surface"),
             "access": e["tags"].get("access"),
             "name": e["tags"].get("name"),
+            "length_tag": e["tags"].get("length"),
             "geometry": ring,
         }
-        for e in elements
+        for e in _overpass(_tracks_query(region))
         if e["type"] in ("way", "relation") and (ring := _lap_ring(e)) is not None
     ]
     tracks = gpd.GeoDataFrame(pd.DataFrame(track_rows), crs=WGS84).to_crs(LV95)
-
     region.dir.mkdir(parents=True, exist_ok=True)
-    stops.to_parquet(region.dir / "osm_stops.parquet")
     tracks.to_parquet(region.dir / "osm_tracks.parquet")
-    return stops, tracks
+    return tracks
+
+
+def fetch(region: Region) -> None:
+    fetch_stops(region)
+    fetch_tracks(region)
