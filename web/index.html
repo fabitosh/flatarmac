@@ -13,12 +13,14 @@
       --ink-muted: #6b6b66;
       --border: #e2e1dd;
       --junction: #eb6834;
+      --route: #eb6834;
     }
     html, body { margin: 0; height: 100%; background: var(--surface); color: var(--ink);
       font: 13px/1.4 system-ui, -apple-system, sans-serif; }
     #map { position: absolute; inset: 0; }
     .panel { position: absolute; top: 12px; left: 12px; z-index: 1; background: var(--surface);
       border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; max-width: 260px;
+      max-height: calc(100vh - 48px); overflow-y: auto; box-sizing: border-box;
       box-shadow: 0 1px 4px rgb(0 0 0 / 8%); }
     .panel h1 { font-size: 14px; margin: 0 0 6px; }
     .panel p { margin: 0 0 8px; color: var(--ink-muted); }
@@ -35,6 +37,18 @@
     .maplibregl-popup-content td { padding: 0 6px 0 0; }
     .maplibregl-popup-content td.num { text-align: right; font-variant-numeric: tabular-nums; }
     .muted { color: var(--ink-muted); }
+    #routes { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+    #routes:empty { display: none; }
+    #routes h2 { font-size: 13px; margin: 0 0 6px; }
+    .route { display: block; width: 100%; text-align: left; border: 1px solid var(--border);
+      background: var(--surface); border-radius: 6px; padding: 6px 8px; margin: 0 0 4px;
+      cursor: pointer; font: inherit; color: var(--ink); }
+    .route[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+    .route .stats { color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+    .route a { color: var(--ink); }
+    .key { display: inline-block; width: 22px; height: 0; vertical-align: middle; margin-right: 6px; }
+    .key.main { border-top: 4px solid var(--route); }
+    .key.transit { border-top: 3px dashed var(--ink); }
     @media (max-width: 480px) { .panel { left: 8px; right: 8px; max-width: none; } }
   </style>
 </head>
@@ -49,6 +63,7 @@
     </div>
     <div id="legend"></div>
     <div class="legend-row"><span class="dot"></span><span>Junction delay (size = seconds)</span></div>
+    <div id="routes"></div>
   </div>
   <script>
     const region = new URLSearchParams(location.search).get("region") || "zurich";
@@ -115,7 +130,59 @@
         },
       });
       setMode(mode);
+      if (routesName) loadRoutes();
     });
+
+    // --- route suggestions (?routes=<name>, written by `flatarmac plan --name <name>`) ---
+    const routesName = new URLSearchParams(location.search).get("routes");
+    const routesDir = `../data/${region}/routes`;
+    const km = (m) => (m / 1000).toFixed(1);
+
+    async function loadRoutes() {
+      const data = await (await fetch(`${routesDir}/${routesName}.geojson`)).json();
+      map.addSource("routes", { type: "geojson", data });
+      map.addLayer({
+        id: "route-transit", type: "line", source: "routes",
+        filter: ["all", ["==", ["get", "rank"], 1], ["!=", ["get", "leg"], "main"]],
+        layout: { "line-cap": "round" },
+        paint: { "line-color": "#1f1f1d", "line-width": 3, "line-dasharray": [1, 2] },
+      });
+      map.addLayer({
+        id: "route-main", type: "line", source: "routes",
+        filter: ["all", ["==", ["get", "rank"], 1], ["==", ["get", "leg"], "main"]],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#eb6834", "line-width": 6 },
+      });
+      map.setPaintProperty("edges", "line-opacity", 0.35);
+      map.setLayoutProperty("junctions", "visibility", "none");
+
+      const byRank = new Map();
+      for (const f of data.features) byRank.set(f.properties.rank, f.properties);
+      const box = document.getElementById("routes");
+      box.innerHTML = `<h2>Suggestions · ${routesName}</h2>
+        <div class="legend-row"><span class="key main"></span>Main block (laps)</div>
+        <div class="legend-row"><span class="key transit"></span>Warm-up / cool-down</div>` +
+        [...byRank.values()].map((p) => `
+        <button class="route" data-rank="${p.rank}" aria-pressed="${p.rank === 1}">
+          <strong>${p.rank}. ${p.name}</strong>
+          <div class="stats">${p.kind.replaceAll("_", " ")} · lap ${p.lap_m} m × ${p.laps}</div>
+          <div class="stats">${p.main_s_per_km} s/km · to block ${km(p.warmup_m)} km · total ${km(p.total_m)} km</div>
+          <a href="${routesDir}/${routesName}_${p.rank}.gpx" download>GPX</a>
+        </button>`).join("");
+      box.querySelectorAll(".route").forEach((b) => b.addEventListener("click", () => selectRoute(+b.dataset.rank, data)));
+      selectRoute(1, data);
+    }
+
+    function selectRoute(rank, data) {
+      document.querySelectorAll(".route").forEach((b) => b.setAttribute("aria-pressed", String(+b.dataset.rank === rank)));
+      map.setFilter("route-main", ["all", ["==", ["get", "rank"], rank], ["==", ["get", "leg"], "main"]]);
+      map.setFilter("route-transit", ["all", ["==", ["get", "rank"], rank], ["!=", ["get", "leg"], "main"]]);
+      const bounds = new maplibregl.LngLatBounds();
+      for (const f of data.features) {
+        if (f.properties.rank === rank) f.geometry.coordinates.forEach((c) => bounds.extend([c[0], c[1]]));
+      }
+      map.fitBounds(bounds, { padding: { top: 40, bottom: 40, left: 300, right: 40 }, maxZoom: 16 });
+    }
 
     const fmt = (v) => (v == null ? "–" : Number(v).toFixed(1));
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "280px" });
