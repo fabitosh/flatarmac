@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "web",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8765", "--bind", "127.0.0.1"],
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "flatarmac", "serve", "--port", "8765"],
       "port": 8765
     }
   ]
