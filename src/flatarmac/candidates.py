@@ -4,13 +4,10 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import rasterio
-import shapely
 
 from flatarmac import elevation
 from flatarmac.costs import MAIN, CostModel, SurfaceMode, edge_penalty_s
 
-TRACK_SPORTS = {"running", "athletics"}
-TRACK_MIN_M, TRACK_MAX_M = 250.0, 2000.0
 TRACK_ACCESS_M = 100.0
 
 # OSM surface -> surface key used by CostModel.surface_s_per_km
@@ -58,28 +55,24 @@ def stroke_costs(strokes: pd.DataFrame, edges: pd.DataFrame, turns: pd.DataFrame
 
 
 def tracks(
-    osm_tracks: gpd.GeoDataFrame, nodes: gpd.GeoDataFrame, dem_path, model: CostModel
+    curated: gpd.GeoDataFrame, nodes: gpd.GeoDataFrame, dem_path, model: CostModel
 ) -> gpd.GeoDataFrame:
-    rings = osm_tracks[
-        osm_tracks["sport"].fillna("").str.split(";").apply(lambda s: bool(TRACK_SPORTS & set(s)))
-    ].copy()
-    rings = rings[shapely.is_closed(rings.geometry.values)]
-    rings["lap_m"] = rings.length
-    rings = rings[rings["lap_m"].between(TRACK_MIN_M, TRACK_MAX_M)]
-    # Athletics tracks are mapped along the outer edge; lane 1 is 400 m.
-    standard = rings["sport"].str.contains("athletics") & rings["lap_m"].between(380, 480)
-    rings.loc[standard, "lap_m"] = 400.0
+    """Curated tracks (see tracklist) with per-lap cost per mode and a network access node.
 
+    `lap_m` comes from the curated list; the ring geometry only gives shape and gradient.
+    """
+    rings = curated.copy()
     with rasterio.open(dem_path) as dem:
-        gradient_s = []
-        for ring in rings.geometry:
-            draped = elevation.drape(ring, dem)
-            gradient_s.append(model.gradient.edge_seconds(elevation.profile(draped)))
+        rings["geometry"] = [elevation.drape(ring, dem) for ring in rings.geometry]
+    gradient_s = np.array(
+        [model.gradient.edge_seconds(elevation.profile(ring)) for ring in rings.geometry]
+    )
+    lap_share = rings["lap_m"].to_numpy() / rings.length.to_numpy()
     km = rings["lap_m"] / 1000
     surface_key = rings["surface"].map(TRACK_SURFACE).fillna("k_W")
     for mode in SurfaceMode:
         surface_s = km * surface_key.map(model.surface_s_per_km[mode])
-        rings[f"cost_{mode}"] = MAIN.gradient * np.array(gradient_s) + MAIN.surface * surface_s
+        rings[f"cost_{mode}"] = MAIN.gradient * gradient_s * lap_share + MAIN.surface * surface_s
 
     near = gpd.sjoin_nearest(
         rings[["osm_id", "geometry"]],

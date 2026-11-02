@@ -3,7 +3,7 @@
 import geopandas as gpd
 import pandas as pd
 
-from flatarmac import candidates, elevation, network, stops, strokes
+from flatarmac import candidates, elevation, network, stops, strokes, tracklist
 from flatarmac.config import Region
 from flatarmac.costs import STAIRS, CostModel, SurfaceMode, road_class
 
@@ -58,7 +58,7 @@ def build(region: Region, model: CostModel | None = None) -> None:
 
     stroke_table = candidates.stroke_costs(strokes.build(edges, turns), edges, turns)
     track_table = candidates.tracks(
-        gpd.read_parquet(region.dir / "osm_tracks.parquet"), nodes, region.dir / "dem_2m.tif", model
+        tracklist.included(region), nodes, region.dir / "dem_2m.tif", model
     )
 
     edges.to_parquet(region.dir / "edges.parquet")
