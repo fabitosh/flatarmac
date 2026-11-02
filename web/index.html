@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>flatarmac</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <style>
+    :root {
+      --surface: #fcfcfb;
+      --ink: #1f1f1d;
+      --ink-muted: #6b6b66;
+      --border: #e2e1dd;
+      --junction: #eb6834;
+      --route: #eb6834;
+      --track: #a43fb5;
+      --start: #1f1f1d;
+      --error: #d03b3b;
+    }
+    html, body { margin: 0; height: 100%; background: var(--surface); color: var(--ink);
+      font: 13px/1.4 system-ui, -apple-system, sans-serif; }
+    #map { position: absolute; inset: 0; }
+    .panel { position: absolute; top: 12px; left: 12px; z-index: 1; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; width: 280px;
+      max-height: calc(100vh - 48px); overflow-y: auto; box-sizing: border-box;
+      box-shadow: 0 1px 4px rgb(0 0 0 / 8%); }
+    .panel h1 { font-size: 15px; margin: 0 0 8px; }
+    .panel h2 { font-size: 13px; margin: 0 0 6px; }
+    .panel p { margin: 0 0 8px; color: var(--ink-muted); }
+    section + section, details { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+    section:empty { display: none; }
+    .seg { display: flex; gap: 4px; }
+    .seg button { flex: 1; border: 1px solid var(--border); background: var(--surface);
+      border-radius: 6px; padding: 4px 6px; cursor: pointer; color: var(--ink); font: inherit; }
+    .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+    .field { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 6px; margin: 6px 0; }
+    .field label { color: var(--ink-muted); }
+    .field .inputs { display: flex; gap: 4px; min-width: 0; }
+    input, select { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 3px 6px; min-width: 0; }
+    input[type="number"] { width: 56px; }
+    input[type="text"] { width: 56px; }
+    .point { font-variant-numeric: tabular-nums; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .point.set { color: var(--ink); }
+    .linkish { border: 0; background: none; padding: 0; color: var(--ink); text-decoration: underline; cursor: pointer; font: inherit; }
+    .primary { width: 100%; margin-top: 8px; border: 0; border-radius: 6px; padding: 7px; font: inherit;
+      font-weight: 600; background: var(--ink); color: var(--surface); cursor: pointer; }
+    .primary:disabled { opacity: 0.4; cursor: default; }
+    #status { margin-top: 6px; color: var(--ink-muted); min-height: 1em; }
+    #status.error { color: var(--error); }
+    .legend-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+    .swatch { width: 28px; border-radius: 2px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--junction);
+      box-shadow: 0 0 0 2px var(--surface); margin: 0 9px; }
+    .key { display: inline-block; width: 22px; height: 0; vertical-align: middle; }
+    .key.laps { border-top: 7px solid var(--route); }
+    .key.once { border-top: 3px solid var(--route); }
+    .key.transit { border-top: 3px dotted var(--ink); }
+    .key.track { width: 14px; height: 10px; border: 3px solid var(--track); border-radius: 6px; }
+    summary { cursor: pointer; font-weight: 600; }
+    .route { display: block; width: 100%; text-align: left; border: 1px solid var(--border);
+      background: var(--surface); border-radius: 6px; padding: 6px 8px; margin: 0 0 4px;
+      cursor: pointer; font: inherit; color: var(--ink); }
+    .route[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+    .route.track { border-left: 4px solid var(--track); }
+    .route .stats { color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+    .route a { color: var(--ink); }
+    .maplibregl-popup-content { font: 12px/1.45 system-ui, sans-serif; color: var(--ink); }
+    .maplibregl-popup-content table { border-collapse: collapse; }
+    .maplibregl-popup-content td { padding: 0 6px 0 0; }
+    .maplibregl-popup-content td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { color: var(--ink-muted); }
+    .pin { width: 14px; height: 14px; border-radius: 50%; border: 3px solid var(--surface);
+      box-shadow: 0 0 0 1px var(--ink); background: var(--start); cursor: grab; }
+    .pin.end { background: var(--surface); box-shadow: 0 0 0 3px var(--ink); }
+    @media (max-width: 480px) {
+      .panel { left: 8px; right: 52px; width: auto; max-height: 55vh; }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="panel">
+    <h1>flatarmac</h1>
+
+    <section id="plan">
+      <h2>Plan a run</h2>
+      <div class="field"><label>Start</label>
+        <div class="point" id="start-label">Click the map</div></div>
+      <div class="field"><label>Finish</label>
+        <div class="point" id="end-label">Back to start · <button class="linkish" id="pick-end" type="button">set other</button></div></div>
+      <div class="field"><label for="main-value">Main block</label>
+        <div class="inputs">
+          <input id="main-value" type="number" min="1" step="1" value="25">
+          <select id="main-unit"><option value="min">min</option><option value="km">km</option></select>
+        </div></div>
+      <div class="field"><label for="main-zone">Main pace</label>
+        <div class="inputs">
+          <select id="main-zone">
+            <option value="threshold">threshold</option><option value="marathon">marathon</option>
+            <option value="interval">interval</option><option value="easy">easy</option>
+          </select>
+        </div></div>
+      <div class="field"><label for="warmup">Warm-up</label>
+        <div class="inputs"><input id="warmup" type="number" min="0" step="1" value="15"> <span class="muted">min</span></div></div>
+      <div class="field"><label for="cooldown">Cool-down</label>
+        <div class="inputs"><input id="cooldown" type="number" min="0" step="1" value="10"> <span class="muted">min</span></div></div>
+      <div class="field"><label for="five-k">5k race</label>
+        <div class="inputs"><input id="five-k" type="text" value="18:13" pattern="\d{1,2}:\d{2}"> <span class="muted">mm:ss</span></div></div>
+      <div class="field"><label>Surface</label>
+        <div class="seg" role="group" aria-label="Surface mode">
+          <button data-mode="tarmac" aria-pressed="true" type="button">Tarmac</button>
+          <button data-mode="firm_natural" aria-pressed="false" type="button">Firm natural</button>
+        </div></div>
+      <button class="primary" id="go" type="button" disabled>Find routes</button>
+      <div id="status" role="status"></div>
+    </section>
+
+    <section id="routes"></section>
+
+    <details>
+      <summary>Map legend</summary>
+      <p style="margin-top:6px">Runnability score for the main block, 0–100. Darker and thicker is better.</p>
+      <div id="legend"></div>
+      <div class="legend-row"><span class="dot"></span><span>Junction delay (size = seconds)</span></div>
+      <div class="legend-row"><span class="key track"></span>Running track (always suggested when in reach)</div>
+      <div class="legend-row"><span class="key laps"></span>Laps (repeated)</div>
+      <div class="legend-row"><span class="key once"></span>Main pace, run once on the way</div>
+      <div class="legend-row"><span class="key transit"></span>Warm-up / cool-down</div>
+    </details>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const region = params.get("region") || "zurich";
+    const dataUrl = (name) => `../data/${region}/web/${name}.geojson`;
+    const routesDir = `../data/${region}/routes`;
+    const km = (m) => (m / 1000).toFixed(1);
+    const fmt = (v) => (v == null ? "–" : Number(v).toFixed(1));
+
+    // Sequential blue, dark = high score (good). Lower bounds of the 0–100 score, best first.
+    const BINS = [
+      { min: 90, color: "#0d366b", width: 4, label: "90–100" },
+      { min: 75, color: "#1c5cab", width: 3, label: "75–90" },
+      { min: 50, color: "#3987e5", width: 2.2, label: "50–75" },
+      { min: 25, color: "#86b6ef", width: 1.5, label: "25–50" },
+      { min: 0, color: "#cde2fb", width: 1, label: "< 25" },
+    ];
+    document.getElementById("legend").innerHTML = BINS.map((b) =>
+      `<div class="legend-row"><span class="swatch" style="height:${b.width}px;background:${b.color}"></span>${b.label}</div>`
+    ).join("");
+    const step = (prop, key) => {
+      const expr = ["step", ["get", prop], BINS.at(-1)[key]];
+      BINS.slice(0, -1).reverse().forEach((b) => expr.push(b.min, b[key]));
+      return expr;
+    };
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: "https://vectortiles.geo.admin.ch/styles/ch.swisstopo.lightbasemap.vt/style.json",
+      center: [8.54, 47.375],
+      zoom: 13,
+      hash: true,
+    });
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+    // --- surface mode ---
+    let mode = "tarmac";
+    const setMode = (next) => {
+      mode = next;
+      document.querySelectorAll("[data-mode]").forEach((b) =>
+        b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+      if (!map.getLayer("edges")) return;
+      const prop = `score_${mode}`;
+      map.setPaintProperty("edges", "line-color", step(prop, "color"));
+      map.setPaintProperty("edges", "line-width", step(prop, "width"));
+      map.setLayoutProperty("edges", "line-sort-key", ["get", prop]);
+    };
+    document.querySelectorAll("[data-mode]").forEach((b) =>
+      b.addEventListener("click", () => setMode(b.dataset.mode)));
+
+    // --- start / finish points ---
+    let start = null, end = null, picking = "start";
+    const pin = (cls) => { const el = document.createElement("div"); el.className = `pin ${cls}`; return el; };
+    const startMarker = new maplibregl.Marker({ element: pin("start"), draggable: true });
+    const endMarker = new maplibregl.Marker({ element: pin("end"), draggable: true });
+    const label = (p) => `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`;
+
+    function renderPoints() {
+      const s = document.getElementById("start-label");
+      s.textContent = start ? label(start) : "Click the map";
+      s.classList.toggle("set", !!start);
+      const e = document.getElementById("end-label");
+      if (picking === "end") {
+        e.innerHTML = `Click the map · <button class="linkish" id="clear-end" type="button">cancel</button>`;
+      } else if (end) {
+        e.innerHTML = `<span class="set">${label(end)}</span> · <button class="linkish" id="clear-end" type="button">clear</button>`;
+      } else {
+        e.innerHTML = `Back to start · <button class="linkish" id="pick-end" type="button">set other</button>`;
+      }
+      document.getElementById("pick-end")?.addEventListener("click", () => { picking = "end"; renderPoints(); });
+      document.getElementById("clear-end")?.addEventListener("click", () => {
+        end = null; picking = "start"; endMarker.remove(); renderPoints();
+      });
+      document.getElementById("go").disabled = !start;
+    }
+    map.on("click", (e) => {
+      if (picking === "end") {
+        end = e.lngLat; endMarker.setLngLat(end).addTo(map); picking = "start";
+      } else {
+        start = e.lngLat; startMarker.setLngLat(start).addTo(map);
+      }
+      renderPoints();
+    });
+    startMarker.on("dragend", () => { start = startMarker.getLngLat(); renderPoints(); });
+    endMarker.on("dragend", () => { end = endMarker.getLngLat(); renderPoints(); });
+    renderPoints();
+
+    // --- planning ---
+    const zoneField = document.getElementById("main-zone");
+    document.getElementById("main-unit").addEventListener("change", (e) => {
+      zoneField.disabled = e.target.value !== "min";
+    });
+
+    async function plan() {
+      const status = document.getElementById("status");
+      const go = document.getElementById("go");
+      status.className = ""; status.textContent = "Finding routes…"; go.disabled = true;
+      const body = {
+        start: [start.lat, start.lng],
+        end: end ? [end.lat, end.lng] : null,
+        main_value: +document.getElementById("main-value").value,
+        main_unit: document.getElementById("main-unit").value,
+        main_zone: zoneField.value,
+        warmup_min: +document.getElementById("warmup").value,
+        cooldown_min: +document.getElementById("cooldown").value,
+        five_k: document.getElementById("five-k").value,
+        mode,
+      };
+      try {
+        const res = await fetch("/api/plan", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        if (res.status === 404 || res.status === 405 || res.status === 501) {
+          throw new Error("No planning server. Start it with `uv run flatarmac serve`.");
+        }
+        const out = await res.json();
+        if (!res.ok) throw new Error(out.detail?.[0]?.msg || out.detail || res.statusText);
+        const s = out.summary;
+        status.textContent = `Main ${km(s.main_m)} km · warm-up ${km(s.warmup_m)} km · cool-down ${km(s.cooldown_m)} km · easy ${s.easy_pace}`;
+        renderRoutes(out.geojson, out.name);
+      } catch (err) {
+        status.className = "error"; status.textContent = err.message;
+      } finally {
+        go.disabled = !start;
+      }
+    }
+    document.getElementById("go").addEventListener("click", plan);
+
+    // --- routes ---
+    // Paths run once sit beside the laps (right-hand side of travel), so they stay visible where
+    // they share a street with the block, and out and back show up as two lines.
+    const ONCE_OFFSET = 7;
+    const TRACK_COLOR = "#a43fb5";
+    const TRACK_LAYERS = ["tracks", "track-dots"];
+    function ensureRouteLayers() {
+      if (map.getSource("routes")) return;
+      map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addLayer({
+        id: "route-transit", type: "line", source: "routes", filter: ["==", ["get", "rank"], -1],
+        layout: { "line-cap": "round" },
+        paint: { "line-color": "#1f1f1d", "line-width": 3, "line-dasharray": [1, 2], "line-offset": ONCE_OFFSET },
+      });
+      // Width separates the repeated block (thick, haloed) from paths run once (thin).
+      map.addLayer({
+        id: "route-once", type: "line", source: "routes", filter: ["==", ["get", "rank"], -1],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#eb6834", "line-width": 3, "line-offset": ONCE_OFFSET },
+      });
+      map.addLayer({
+        id: "route-laps-halo", type: "line", source: "routes", filter: ["==", ["get", "rank"], -1],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#ffffff", "line-width": 11 },
+      });
+      map.addLayer({
+        id: "route-laps", type: "line", source: "routes", filter: ["==", ["get", "rank"], -1],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#eb6834", "line-width": 7 },
+      });
+    }
+
+    function renderRoutes(data, name) {
+      ensureRouteLayers();
+      map.getSource("routes").setData(data);
+      map.setPaintProperty("edges", "line-opacity", 0.35);
+      map.setLayoutProperty("junctions", "visibility", "none");
+
+      const byRank = new Map();
+      for (const f of data.features) byRank.set(f.properties.rank, f.properties);
+      const box = document.getElementById("routes");
+      if (!byRank.size) { box.innerHTML = `<h2>Suggestions</h2><p>No routes found nearby.</p>`; return; }
+      const bust = Date.now();
+      box.innerHTML = `<h2>Suggestions</h2>` + [...byRank.values()].map((p) => `
+        <button class="route ${p.kind}" data-rank="${p.rank}" aria-pressed="false" type="button">
+          <strong>${p.rank}. ${p.name}</strong>
+          <div class="stats">${p.kind.replaceAll("_", " ")} · lap ${p.lap_m} m × ${p.laps}</div>
+          <div class="stats">score ${p.score} · climb ${p.climb_m} m · to block ${km(p.warmup_m)} km · total ${km(p.total_m)} km</div>
+          ${p.on_the_way_m > 0 ? `<div class="stats">${km(p.on_the_way_m)} km of the main block on the way</div>` : ""}
+          <a href="${routesDir}/${name}_${p.rank}.gpx?v=${bust}" download="flatarmac_${p.rank}.gpx">GPX</a>
+        </button>`).join("");
+      box.querySelectorAll(".route").forEach((b) => b.addEventListener("click", (e) => {
+        if (e.target.tagName !== "A") selectRoute(+b.dataset.rank, data);
+      }));
+      selectRoute(1, data);
+    }
+
+    function selectRoute(rank, data) {
+      document.querySelectorAll(".route").forEach((b) => b.setAttribute("aria-pressed", String(+b.dataset.rank === rank)));
+      const ofRank = ["==", ["get", "rank"], rank];
+      const leg = (...names) => ["in", ["get", "leg"], ["literal", names]];
+      map.setFilter("route-laps", ["all", ofRank, leg("main")]);
+      map.setFilter("route-laps-halo", ["all", ofRank, leg("main")]);
+      map.setFilter("route-once", ["all", ofRank, leg("approach", "return")]);
+      map.setFilter("route-transit", ["all", ofRank, leg("warmup", "cooldown")]);
+      const bounds = new maplibregl.LngLatBounds();
+      for (const f of data.features) {
+        if (f.properties.rank === rank) f.geometry.coordinates.forEach((c) => bounds.extend([c[0], c[1]]));
+      }
+      const narrow = window.innerWidth <= 480;
+      map.fitBounds(bounds, {
+        padding: narrow ? { top: 40, bottom: 40, left: 40, right: 40 } : { top: 40, bottom: 40, left: 320, right: 40 },
+        maxZoom: 16,
+      });
+    }
+
+    // --- base layers ---
+    map.on("load", async () => {
+      map.addSource("edges", { type: "geojson", data: dataUrl("edges") });
+      map.addSource("junctions", { type: "geojson", data: dataUrl("junctions") });
+      map.addLayer({
+        id: "edges", type: "line", source: "edges",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": BINS[0].color, "line-width": 2 },
+      });
+      map.addLayer({
+        id: "junctions", type: "circle", source: "junctions", minzoom: 13,
+        paint: {
+          "circle-color": "#eb6834",
+          "circle-radius": ["interpolate", ["linear"], ["get", "through_s"], 0, 3, 30, 9],
+          "circle-stroke-color": "#fcfcfb",
+          "circle-stroke-width": 2,
+        },
+      });
+      // Running tracks: rings when zoomed in, dots when zoomed out.
+      const tracks = await (await fetch(dataUrl("tracks"))).json();
+      const centres = tracks.features.map((f) => {
+        const c = f.geometry.coordinates;
+        const mean = (i) => c.reduce((s, p) => s + p[i], 0) / c.length;
+        return { type: "Feature", properties: f.properties, geometry: { type: "Point", coordinates: [mean(0), mean(1)] } };
+      });
+      map.addSource("tracks", { type: "geojson", data: tracks });
+      map.addSource("track-centres", { type: "geojson", data: { type: "FeatureCollection", features: centres } });
+      map.addLayer({
+        id: "tracks-halo", type: "line", source: "tracks", minzoom: 14,
+        layout: { "line-join": "round" },
+        paint: { "line-color": "#ffffff", "line-width": 8 },
+      });
+      map.addLayer({
+        id: "tracks", type: "line", source: "tracks", minzoom: 14,
+        layout: { "line-join": "round" },
+        paint: { "line-color": TRACK_COLOR, "line-width": 4 },
+      });
+      map.addLayer({
+        id: "track-dots", type: "circle", source: "track-centres", maxzoom: 14,
+        paint: {
+          "circle-color": TRACK_COLOR,
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 4, 14, 7],
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 2,
+        },
+      });
+      setMode(mode);
+      const saved = params.get("routes");
+      if (saved) {
+        const data = await (await fetch(`${routesDir}/${saved}.geojson`)).json();
+        renderRoutes(data, saved);
+      }
+    });
+
+    // --- hover details ---
+    const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "280px" });
+    map.on("mousemove", "edges", (e) => {
+      if (map.queryRenderedFeatures(e.point, { layers: TRACK_LAYERS }).length) return;
+      map.getCanvas().style.cursor = "crosshair";
+      const p = e.features[0].properties;
+      const rows = [
+        ["Score", `${p[`score_${mode}`]} / 100`],
+        ["Length", `${fmt(p.length_m)} m`],
+        ["Ascent", `${fmt(p.ascent_m)} m`],
+        ["Max grade", `${fmt(p.max_grade_pct)} %`],
+        ["Penalty, seconds", ""],
+        ["Gradient", `${fmt(p.gradient_s)} s`],
+        ["Surface", `${fmt(p[`surface_s_${mode}`])} s`],
+        ["Traffic", `${fmt(p.traffic_s)} s`],
+        ["Stairs", `${fmt(p.obstacle_s)} s`],
+        ["Stops", `${fmt(p.stops_s)} s`],
+      ];
+      popup.setLngLat(e.lngLat).setHTML(
+        `<strong>${p.name && p.name !== "null" ? p.name : p.objektart}</strong>
+         <div class="muted">${p.objektart} · ${p.belagsart} · ${p.kunstbaute}</div>
+         <table>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${v}</td></tr>`).join("")}</table>`
+      ).addTo(map);
+    });
+    map.on("mousemove", "junctions", (e) => {
+      const p = e.features[0].properties;
+      popup.setLngLat(e.lngLat).setHTML(
+        `<strong>Junction</strong><div class="muted">${p.control === "null" ? "no OSM control" : p.control} · degree ${p.degree}</div>
+         <table><tr><td>Through delay</td><td class="num">${fmt(p.through_s)} s</td></tr></table>`
+      ).addTo(map);
+    });
+    map.on("mousemove", TRACK_LAYERS, (e) => {
+      map.getCanvas().style.cursor = "pointer";
+      const p = e.features[0].properties;
+      popup.setLngLat(e.lngLat).setHTML(
+        `<strong>${p.name}</strong><div class="muted">running track · ${p.surface}</div>
+         <table><tr><td>Lap</td><td class="num">${Math.round(p.lap_m)} m</td></tr></table>`
+      ).addTo(map);
+    });
+    for (const layer of ["edges", "junctions", ...TRACK_LAYERS]) {
+      map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; popup.remove(); });
+    }
+  </script>
+</body>
+</html>
