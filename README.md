@@ -26,10 +26,21 @@ relaxed penalties; whatever the way to the block doesn't cover is run easy on th
 Results go to `data/<region>/routes/<name>.geojson` plus one GPX per suggestion; view them at
 `web/index.html?routes=<name>`.
 
-## Map
+## Web UI
 
 ```bash
-python3 -m http.server 8765
+uv run flatarmac serve
 ```
 
-Open <http://localhost:8765/web/index.html>.
+Open <http://localhost:8765>, click the map to set a start (optionally a different finish), set the
+main block, warm-up, cool-down and 5k time, then **Find routes**. Each suggestion has a GPX download.
+
+## Tracks
+
+Running tracks come from the hand-editable list `curated/tracks_<region>.csv` (`lap_m`, `include`,
+`name`, `surface`). Run `uv run flatarmac build` after editing. To pick up new OSM tracks:
+
+```bash
+uv run flatarmac tracks --discover          # query Overpass for leisure=track (needs a built region)
+uv run flatarmac tracks --add relation/123  # add one by OSM id
+```
