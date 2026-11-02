@@ -1,11 +1,12 @@
-"""Route suggestions: warm-up -> flat main block (laps) -> cool-down.
+"""Route suggestions: warm-up -> flat main block -> cool-down.
 
-The main block is repeated laps of one candidate: an out-and-back on a sub-stretch of a stroke, a
-closed stroke, or a running track. Warm-up and cool-down are routed with relaxed weights. Transit up
-to the planned warm-up/cool-down distance is free (any remaining warm-up happens on the flat block);
-transit beyond it is penalised.
+The main block is laps of one "block": an out-and-back on part of a stroke, a loop (closed stroke
+or a cycle in the network), or a running track. Warm-up and cool-down are routed with relaxed
+weights. If the block is further away than the warm-up (cool-down) covers, the extra distance is
+run as part of the main block, scored with main-block weights, and fewer laps remain on the block.
 """
 
+import itertools
 from dataclasses import dataclass, field
 
 import geopandas as gpd
@@ -17,13 +18,22 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
 from flatarmac.config import LV95, WGS84, Region
-from flatarmac.costs import TRANSIT, CostModel, SurfaceMode, edge_penalty_s
+from flatarmac.costs import MAIN, TRANSIT, CostModel, SurfaceMode, edge_penalty_s
 from flatarmac.pace import Runner, Zone
 
 MIN_STRETCH_M = 150.0
-EXCESS_TRANSIT_S_PER_KM = 120.0
-REACH_FACTOR = 1.6  # search radius relative to the transit budget
+MIN_LOOP_M = 400.0
+MAX_LOOP_M = 6000.0
+MAX_ON_THE_WAY = 0.5  # at most this share of the main block is run on the way to / from the block
+REACH_FACTOR = 1.6  # search radius relative to the warm-up / cool-down distance
 MIN_SEPARATION_M = 400.0
+LAP_BANDS = (1000.0, 2500.0)  # lap length bands: short < 1 km <= medium < 2.5 km <= long
+
+
+def lap_band(lap_m: float) -> str:
+    if lap_m < LAP_BANDS[0]:
+        return "short"
+    return "medium" if lap_m < LAP_BANDS[1] else "long"
 
 
 @dataclass(frozen=True)
@@ -70,11 +80,15 @@ def make_request(
 
 @dataclass
 class Transit:
-    """Best relaxed-cost paths from one node to every reachable node."""
+    """Best relaxed-cost paths from one node to every reachable node.
+
+    `legs[budget]` is the penalty of the path to each node when the first `budget` metres are
+    warm-up / cool-down (relaxed weights) and anything beyond is main block (strict weights).
+    """
 
     source: int
     dist_m: np.ndarray
-    penalty_s: np.ndarray
+    legs: dict[float, np.ndarray]
     predecessors: np.ndarray
 
     def path_nodes(self, target: int) -> list[int]:
@@ -83,22 +97,44 @@ class Transit:
             nodes.append(int(self.predecessors[nodes[-1]]))
         return nodes[::-1]  # source -> target
 
-    def score(self, node, budget_m: float) -> np.ndarray:
-        excess = np.maximum(self.dist_m[node] - budget_m, 0.0)
-        return self.penalty_s[node] + EXCESS_TRANSIT_S_PER_KM * excess / 1000
+    def excess_m(self, node, budget_m: float):
+        return np.maximum(self.dist_m[node] - budget_m, 0.0)
+
+    def leg_s(self, node, budget_m: float):
+        return self.legs[budget_m][node]
+
+
+@dataclass
+class Block:
+    """A place to run laps."""
+
+    kind: str  # out_and_back | loop | track
+    lap_m: float
+    lap_s: float  # main-block penalty per lap
+    nodes: np.ndarray  # network nodes where the block can be joined
+    edges: list[tuple[int, bool]] = field(default_factory=list)  # (edge_id, forward), one way
+    geometry: shapely.LineString | None = None  # tracks only
+    access_m: float = 0.0  # tracks: connector from the network
+    name: str | None = None
+
+    @property
+    def band(self) -> str:
+        return lap_band(self.lap_m)
 
 
 @dataclass
 class Suggestion:
-    kind: str  # out_and_back | loop | track
+    kind: str
     name: str
     lap_m: float
     laps: float
-    main_s: float
+    main_s: float  # main-block penalty: laps + parts run on the way
     warmup_s: float
     cooldown_s: float
-    warmup_m: float
-    cooldown_m: float
+    warmup_m: float  # distance from start to the block
+    cooldown_m: float  # distance from the block to the end
+    approach_m: float  # part of the way to the block run as main block
+    return_m: float  # part of the way back run as main block
     access_node: int
     main_line: shapely.LineString  # one lap (out-and-back: the stretch one way)
     warmup_nodes: list[int] = field(default_factory=list)
@@ -107,6 +143,10 @@ class Suggestion:
     @property
     def score(self) -> float:
         return self.main_s + self.warmup_s + self.cooldown_s
+
+    @property
+    def band(self) -> str:
+        return lap_band(self.lap_m)
 
 
 class Planner:
@@ -117,6 +157,15 @@ class Planner:
         self.tracks = gpd.read_parquet(region.dir / "tracks.parquet")
         strokes = pd.read_parquet(region.dir / "strokes.parquet")
         self.strokes = {sid: group for sid, group in strokes.groupby("stroke_id", sort=False)}
+        turns = pd.read_parquet(region.dir / "turns.parquet")
+        self.turn_s = dict(
+            zip(
+                zip(turns["node_id"], turns["in_edge"], turns["out_edge"], strict=True),
+                turns["turn_s"],
+                strict=True,
+            )
+        )
+        self.node_xy = shapely.get_coordinates(self.nodes.geometry.values)
         self.node_tree = shapely.STRtree(self.nodes.geometry.values)
         named = self.edges[self.edges["name"].notna()]
         self.named_tree = shapely.STRtree(named.geometry.values)
@@ -124,14 +173,11 @@ class Planner:
         self.to_lv95 = Transformer.from_crs(WGS84, LV95, always_xy=True)
         self.edge_by_pair: dict[tuple[int, int], int] = {}
 
-    # --- transit -------------------------------------------------------------------------------
+    # --- graphs ----------------------------------------------------------------------------------
 
-    def _transit_graph(self, mode: SurfaceMode, easy_pace_s_per_km: float):
+    def _graph(self, penalty: np.ndarray, easy_pace_s_per_km: float):
+        """Undirected graph (as symmetric CSR) weighted by easy-pace time + penalty."""
         e = self.edges
-        through = self.nodes["through_s"].to_numpy()
-        penalty = edge_penalty_s(e, mode, TRANSIT).to_numpy() + 0.5 * TRANSIT.stops * (
-            through[e["u"]] + through[e["v"]]
-        )
         weight = e["length_m"].to_numpy() * easy_pace_s_per_km / 1000 + penalty
         both = pd.DataFrame(
             {
@@ -145,56 +191,72 @@ class Planner:
         n = len(self.nodes)
         graph = csr_matrix((both["w"], (both["a"], both["b"])), shape=(n, n))
         pair_edge = dict(zip(zip(both["a"], both["b"], strict=True), both["edge"], strict=True))
-        return graph, pair_edge, penalty
+        return graph, pair_edge
 
-    def _transit(self, graph, pair_edge, penalty, source: int, limit_s: float) -> Transit:
+    def _penalties(self, mode: SurfaceMode, weights) -> np.ndarray:
+        """Per-edge penalty incl. half the junction cost at each end."""
+        through = self.nodes["through_s"].to_numpy()
+        e = self.edges
+        return edge_penalty_s(e, mode, weights).to_numpy() + 0.5 * weights.stops * (
+            through[e["u"]] + through[e["v"]]
+        )
+
+    def _tree(self, graph, pair_edge, source: int, limit_s: float):
+        """Dijkstra tree: predecessors, distance along tree paths, nodes in settle order."""
         cost, pred = dijkstra(graph, indices=source, limit=limit_s, return_predecessors=True)
-        n = len(cost)
-        dist = np.full(n, np.inf)
-        pen = np.full(n, np.inf)
-        dist[source] = pen[source] = 0.0
         length = self.edges["length_m"].to_numpy()
+        dist = np.full(len(cost), np.inf)
+        dist[source] = 0.0
         reached = np.flatnonzero(np.isfinite(cost))
-        for node in reached[np.argsort(cost[reached])]:
-            if node == source:
-                continue
-            parent = pred[node]
-            edge = pair_edge[(parent, node)]
-            dist[node] = dist[parent] + length[edge]
-            pen[node] = pen[parent] + penalty[edge]
-        return Transit(source, dist, pen, pred)
+        order = reached[np.argsort(cost[reached])]
+        for node in order[1:]:
+            dist[node] = dist[pred[node]] + length[pair_edge[(pred[node], node)]]
+        return pred, dist, order
+
+    def _transit(self, graph, pair_edge, source, limit_s, relaxed, strict, budgets) -> Transit:
+        """Tree from `source`; per budget, penalty with relaxed weights for the first `budget`
+        metres and strict weights beyond (edges straddling the budget are split pro rata)."""
+        pred, dist, order = self._tree(graph, pair_edge, source, limit_s)
+        length = self.edges["length_m"].to_numpy()
+        legs = {}
+        for budget in set(budgets):
+            leg = np.full(len(dist), np.inf)
+            leg[source] = 0.0
+            for node in order[1:]:
+                parent = pred[node]
+                edge = pair_edge[(parent, node)]
+                beyond = np.clip((dist[node] - budget) / max(length[edge], 1e-9), 0.0, 1.0)
+                leg[node] = leg[parent] + (1 - beyond) * relaxed[edge] + beyond * strict[edge]
+            legs[budget] = leg
+        return Transit(source, dist, legs, pred)
 
     def snap(self, lat_lon: tuple[float, float]) -> int:
         x, y = self.to_lv95.transform(lat_lon[1], lat_lon[0])
         return int(self.node_tree.nearest(shapely.Point(x, y)))
 
-    # --- candidates ------------------------------------------------------------------------------
+    # --- blocks ----------------------------------------------------------------------------------
 
-    def _stroke_candidates(self, req: Request, wu: Transit, cd: Transit) -> list[Suggestion]:
+    def _stroke_blocks(self, req: Request, transit_s: np.ndarray) -> list[Block]:
+        """Out-and-backs: per stroke and lap band, the best section (incl. how to get there).
+        Closed strokes become loops."""
         cost_col = f"cost_{req.mode}"
         u_turn = self.model.turn_s(180.0)
-        results = []
+        blocks = []
         for group in self.strokes.values():
             nodes = np.append(group["from_node"].to_numpy(), group["to_node"].to_numpy()[-1])
-            transit = wu.score(nodes, req.warmup_m) + cd.score(nodes, req.cooldown_m)
+            transit = transit_s[nodes]
             if not np.isfinite(transit).any():
                 continue
             length = group["length_m"].to_numpy()
             cost = group[cost_col].to_numpy()
             turn = group["turn_next_s"].to_numpy()
+            edges = list(zip(group["edge_id"], group["forward"], strict=True))
 
             if group["closed"].iloc[0]:
-                lap_m = length.sum()
-                if lap_m < MIN_STRETCH_M:
-                    continue
-                lap_s = cost.sum() + np.nansum(turn)
-                main_s = lap_s * req.main_m / lap_m
-                access_node = int(nodes[np.argmin(transit)])
-                results.append(
-                    self._suggestion(
-                        "loop", group, 0, len(group), lap_m, main_s, req, wu, cd, access_node
+                if length.sum() >= MIN_LOOP_M:
+                    blocks.append(
+                        Block("loop", length.sum(), cost.sum() + np.nansum(turn), nodes, edges)
                     )
-                )
                 continue
 
             k = len(group)
@@ -204,110 +266,207 @@ class Planner:
             turn_at = np.concatenate([[0.0], np.nan_to_num(turn[:-1]), [0.0]])
             cum_turn = np.cumsum(turn_at)
 
-            best_score, best = np.inf, None
+            best: dict[int, tuple[float, int, int, float, float]] = {}
             for i in range(k):
                 j = np.arange(i + 1, k + 1)
                 stretch = cum_len[j] - cum_len[i]
-                internal_turns = cum_turn[j - 1] - cum_turn[i]
-                one_way = cum_cost[j] - cum_cost[i] + internal_turns
+                one_way = cum_cost[j] - cum_cost[i] + cum_turn[j - 1] - cum_turn[i]
                 lap_m = 2 * stretch
                 lap_s = 2 * one_way + 2 * u_turn
-                main_s = lap_s * req.main_m / lap_m
-                # Best access anywhere on the stretch: running min of transit over nodes i..j.
+                # Best access anywhere on the section: running min of transit over nodes i..j.
                 access = np.minimum.accumulate(transit[i:])[1:]
+                score = lap_s * req.main_m / lap_m + access
                 ok = (stretch >= MIN_STRETCH_M) & (stretch <= req.main_m / 2 * 1.05)
-                score = np.where(ok, main_s + access, np.inf)
-                m = int(np.argmin(score))
-                if score[m] < best_score:
-                    best_score, best = score[m], (i, int(j[m]), lap_m[m], main_s[m])
-            if best is None:
+                band_of = np.digitize(lap_m, LAP_BANDS)
+                for band in np.unique(band_of[ok]):
+                    m = int(np.argmin(np.where(ok & (band_of == band), score, np.inf)))
+                    if np.isfinite(score[m]) and score[m] < best.get(band, (np.inf,))[0]:
+                        best[band] = (score[m], i, int(j[m]), lap_m[m], lap_s[m])
+            for _, i, j, lap_m, lap_s in best.values():
+                blocks.append(Block("out_and_back", lap_m, lap_s, nodes[i : j + 1], edges[i:j]))
+        return blocks
+
+    def _track_blocks(self, req: Request) -> list[Block]:
+        return [
+            Block(
+                kind="track",
+                lap_m=t.lap_m,
+                lap_s=getattr(t, f"cost_{req.mode}"),
+                nodes=np.array([t.access_node]),
+                geometry=t.geometry,
+                access_m=t.access_m,
+                name=t.name,
+            )
+            for t in self.tracks.itertuples()
+        ]
+
+    def _cycle_blocks(self, req: Request, source: int, limit_s: float) -> list[Block]:
+        """Loops from a shortest-path tree on main-block costs: every non-tree edge closes a cycle
+        made of two good branches. One Dijkstra gives thousands of loops of all sizes."""
+        penalty = self._penalties(req.mode, MAIN)
+        graph, pair_edge = self._graph(penalty, req.easy_pace_s_per_km)
+        pred, dist, order = self._tree(graph, pair_edge, source, limit_s)
+        e = self.edges
+        length = e["length_m"].to_numpy()
+        main_cost = edge_penalty_s(e, req.mode, MAIN).to_numpy()
+        u_arr, v_arr = e["u"].to_numpy(), e["v"].to_numpy()
+        max_lap = min(MAX_LOOP_M, req.main_m)
+
+        reached = np.isfinite(dist)
+        tree_edge = np.zeros(len(e), dtype=bool)
+        for node in order[1:]:
+            tree_edge[pair_edge[(pred[node], node)]] = True
+        closing = np.flatnonzero(reached[u_arr] & reached[v_arr] & ~tree_edge & (u_arr != v_arr))
+
+        blocks = []
+        for edge in closing:
+            u, v = int(u_arr[edge]), int(v_arr[edge])
+            # Climb from the farther end until both branches meet; give up past max_lap.
+            left, right = [u], [v]
+            total = length[edge]
+            while left[-1] != right[-1] and total <= max_lap:
+                side = left if dist[left[-1]] >= dist[right[-1]] else right
+                parent = int(pred[side[-1]])
+                if parent < 0:
+                    break
+                total += length[pair_edge[(parent, side[-1])]]
+                side.append(parent)
+            if left[-1] != right[-1] or not MIN_LOOP_M <= total <= max_lap:
                 continue
-            i, j, lap_m, main_s = best
-            access_node = int(nodes[i + np.argmin(transit[i : j + 1])])
-            results.append(
-                self._suggestion(
-                    "out_and_back", group, i, j, lap_m, main_s, req, wu, cd, access_node
+            # Cycle: meet -> ... -> u, (u, v), v -> ... -> meet
+            ring = left[::-1] + right
+            ring_edges = [pair_edge[pair] for pair in itertools.pairwise(ring)]
+            ring_edges[len(left) - 1] = int(edge)  # the closing edge, not a parallel one
+            nodes = ring[:-1]
+            incoming = ring_edges[-1:] + ring_edges[:-1]
+            lap_s = main_cost[ring_edges].sum() + sum(
+                self.turn_s.get(key, 0.0) for key in zip(nodes, incoming, ring_edges, strict=True)
+            )
+            forward = [u_arr[x] == a for a, x in zip(nodes, ring_edges, strict=True)]
+            blocks.append(
+                Block(
+                    "loop",
+                    float(total),
+                    float(lap_s),
+                    np.array(nodes),
+                    list(zip(ring_edges, forward, strict=True)),
                 )
             )
-        return results
+        return blocks
 
-    def _track_candidates(self, req: Request, wu: Transit, cd: Transit) -> list[Suggestion]:
-        results = []
-        for track in self.tracks.itertuples():
-            node = track.access_node
-            if not np.isfinite(wu.dist_m[node]) or not np.isfinite(cd.dist_m[node]):
-                continue
-            lap_s = getattr(track, f"cost_{req.mode}")
-            results.append(
-                Suggestion(
-                    kind="track",
-                    name=track.name,
-                    lap_m=track.lap_m,
-                    laps=req.main_m / track.lap_m,
-                    main_s=lap_s * req.main_m / track.lap_m,
-                    warmup_s=float(wu.score(node, req.warmup_m - track.access_m)),
-                    cooldown_s=float(cd.score(node, req.cooldown_m - track.access_m)),
-                    warmup_m=float(wu.dist_m[node] + track.access_m),
-                    cooldown_m=float(cd.dist_m[node] + track.access_m),
-                    access_node=node,
-                    main_line=track.geometry,
-                )
-            )
-        return results
+    # --- evaluation ------------------------------------------------------------------------------
 
-    def _suggestion(self, kind, group, i, j, lap_m, main_s, req, wu, cd, access_node):
-        rows = group.iloc[i:j]
-        parts = []
-        for edge_id, forward in zip(rows["edge_id"], rows["forward"], strict=True):
-            coords = shapely.get_coordinates(self.edges.geometry.iloc[edge_id], include_z=True)
-            parts.append(coords if forward else coords[::-1])
-        line = shapely.LineString(np.vstack(parts))
-        names = self.edges["name"].iloc[rows["edge_id"]].dropna()
-        name = names.mode().iloc[0] if len(names) else self._nearby_name(line)
+    def _evaluate(self, block: Block, req: Request, wu: Transit, cd: Transit) -> Suggestion | None:
+        nodes = block.nodes
+        wu_budget = req.warmup_m - block.access_m
+        cd_budget = req.cooldown_m - block.access_m
+        on_the_way = wu.excess_m(nodes, wu_budget) + cd.excess_m(nodes, cd_budget)
+        feasible = on_the_way <= MAX_ON_THE_WAY * req.main_m  # also False when unreachable
+        laps_m = np.where(feasible, req.main_m - on_the_way, 0.0)
+        # Track connectors (<= 100 m) are ignored in the penalty split.
+        transit = wu.leg_s(nodes, req.warmup_m) + cd.leg_s(nodes, req.cooldown_m)
+        score = np.where(feasible, block.lap_s * laps_m / block.lap_m + transit, np.inf)
+        if not np.isfinite(score).any():
+            return None
+        best = int(np.argmin(score))
+        node = int(nodes[best])
         return Suggestion(
-            kind=kind,
-            name=name,
-            lap_m=float(lap_m),
-            laps=req.main_m / lap_m,
-            main_s=float(main_s),
-            warmup_s=float(wu.score(access_node, req.warmup_m)),
-            cooldown_s=float(cd.score(access_node, req.cooldown_m)),
-            warmup_m=float(wu.dist_m[access_node]),
-            cooldown_m=float(cd.dist_m[access_node]),
-            access_node=access_node,
-            main_line=line,
+            kind=block.kind,
+            name=block.name or "",
+            lap_m=float(block.lap_m),
+            laps=float(laps_m[best] / block.lap_m),
+            main_s=float(block.lap_s * laps_m[best] / block.lap_m),
+            warmup_s=float(wu.leg_s(node, req.warmup_m)),
+            cooldown_s=float(cd.leg_s(node, req.cooldown_m)),
+            warmup_m=float(wu.dist_m[node] + block.access_m),
+            cooldown_m=float(cd.dist_m[node] + block.access_m),
+            approach_m=float(wu.excess_m(node, wu_budget)),
+            return_m=float(cd.excess_m(node, cd_budget)),
+            access_node=node,
+            main_line=block.geometry,  # filled for picked blocks
         )
 
-    def _nearby_name(self, line: shapely.LineString) -> str:
-        index = self.named_tree.nearest(line.centroid)
-        return f"path near {self.named[index]}"
+    def _block_line(self, block: Block) -> shapely.LineString:
+        if block.geometry is not None:
+            return block.geometry
+        parts = []
+        for edge_id, forward in block.edges:
+            coords = shapely.get_coordinates(self.edges.geometry.iloc[edge_id], include_z=True)
+            coords = coords if forward else coords[::-1]
+            parts.append(coords if not parts else coords[1:])
+        return shapely.LineString(np.vstack(parts))
+
+    def _block_name(self, block: Block, line: shapely.LineString) -> str:
+        if block.name:
+            return block.name
+        names = self.edges["name"].iloc[[e for e, _ in block.edges]].dropna()
+        if len(names):
+            return names.mode().iloc[0]
+        return f"path near {self.named[self.named_tree.nearest(line.centroid)]}"
+
+    def _select(self, scored: list[tuple[Suggestion, Block]], top: int):
+        """Best overall, but with variety: reserve slots per kind and per lap band. Blocks of the
+        same kind and band must be apart; different kinds may share a place."""
+        scored = sorted(scored, key=lambda sb: sb[0].score)
+        centre = {id(b): self.node_xy[b.nodes].mean(axis=0) for _, b in scored}
+        picked: list[tuple[Suggestion, Block]] = []
+
+        def fits(s, b):
+            if len(picked) >= top or any(b is pb for _, pb in picked):
+                return False
+            return all(
+                (s.kind, s.band) != (ps.kind, ps.band)
+                or np.hypot(*(centre[id(b)] - centre[id(pb)])) >= MIN_SEPARATION_M
+                for ps, pb in picked
+            )
+
+        quotas = [("kind", k, 2) for k in ("loop", "track", "out_and_back")]
+        quotas += [("band", band, 1) for band in ("short", "medium", "long")]
+        for attr, value, count in quotas:
+            have = sum(getattr(ps, attr) == value for ps, _ in picked)
+            for s, b in scored:
+                if have >= count:
+                    break
+                if getattr(s, attr) == value and fits(s, b):
+                    picked.append((s, b))
+                    have += 1
+        for s, b in scored:
+            if fits(s, b):
+                picked.append((s, b))
+        return sorted(picked, key=lambda sb: sb[0].score)
 
     # --- entry point -----------------------------------------------------------------------------
 
     def plan(self, req: Request) -> list[Suggestion]:
-        graph, pair_edge, penalty = self._transit_graph(req.mode, req.easy_pace_s_per_km)
+        relaxed = self._penalties(req.mode, TRANSIT)
+        strict = self._penalties(req.mode, MAIN)
+        graph, pair_edge = self._graph(relaxed, req.easy_pace_s_per_km)
         self.edge_by_pair = pair_edge
-        reach_m = REACH_FACTOR * max(req.warmup_m, req.cooldown_m) + 1000
+        reach_m = REACH_FACTOR * max(req.warmup_m, req.cooldown_m) + req.main_m * MAX_ON_THE_WAY
         limit_s = reach_m * req.easy_pace_s_per_km / 1000 * 1.5
 
+        def transit_from(node: int) -> Transit:
+            budgets = (req.warmup_m, req.cooldown_m)
+            return self._transit(graph, pair_edge, node, limit_s, relaxed, strict, budgets)
+
         start = self.snap(req.start)
-        wu = self._transit(graph, pair_edge, penalty, start, limit_s)
-        if req.end is None:
-            cd = wu
-        else:
-            cd = self._transit(graph, pair_edge, penalty, self.snap(req.end), limit_s)
+        wu = transit_from(start)
+        cd = wu if req.end is None else transit_from(self.snap(req.end))
 
-        candidates = self._stroke_candidates(req, wu, cd) + self._track_candidates(req, wu, cd)
-        candidates.sort(key=lambda s: s.score)
+        all_nodes = np.arange(len(self.nodes))
+        transit_s = wu.leg_s(all_nodes, req.warmup_m) + cd.leg_s(all_nodes, req.cooldown_m)
+        blocks = (
+            self._stroke_blocks(req, transit_s)
+            + self._cycle_blocks(req, start, limit_s)
+            + self._track_blocks(req)
+        )
+        scored = [(s, b) for b in blocks if (s := self._evaluate(b, req, wu, cd)) is not None]
 
-        picked: list[Suggestion] = []
-        for candidate in candidates:
-            centre = candidate.main_line.centroid
-            if all(centre.distance(p.main_line) >= MIN_SEPARATION_M for p in picked):
-                picked.append(candidate)
-            if len(picked) == req.top:
-                break
-        for suggestion in picked:
+        picked = []
+        for suggestion, block in self._select(scored, req.top):
+            suggestion.main_line = self._block_line(block)
+            suggestion.name = self._block_name(block, suggestion.main_line)
             suggestion.warmup_nodes = wu.path_nodes(suggestion.access_node)
             suggestion.cooldown_nodes = cd.path_nodes(suggestion.access_node)[::-1]
+            picked.append(suggestion)
         return picked

@@ -74,11 +74,29 @@ def main_block_line(s: Suggestion, planner: Planner, main_m: float) -> shapely.L
     return shapely.LineString(coords)
 
 
-def full_run(s: Suggestion, planner: Planner, main_m: float) -> dict[str, shapely.LineString]:
+def _split(line: shapely.LineString | None, at_m: float):
+    """(first part, rest) of a line at a distance; parts that would be empty are None."""
+    if line is None:
+        return None, None
+    at_m = min(max(at_m, 0.0), line.length)
+    head = substring(line, 0, at_m) if at_m > 1 else None
+    tail = substring(line, at_m, line.length) if line.length - at_m > 1 else None
+    return head, tail
+
+
+def full_run(s: Suggestion, planner: Planner, block_m: float) -> dict[str, shapely.LineString]:
+    """Legs in running order. `approach` / `return` are the parts of the way to and from the block
+    that belong to the main block because the block is beyond warm-up / cool-down reach."""
+    to_block = _path_line(planner, s.warmup_nodes)
+    from_block = _path_line(planner, s.cooldown_nodes)
+    warmup, approach = _split(to_block, (to_block.length if to_block else 0) - s.approach_m)
+    back, cooldown = _split(from_block, s.return_m)
     legs = {
-        "warmup": _path_line(planner, s.warmup_nodes),
-        "main": main_block_line(s, planner, main_m),
-        "cooldown": _path_line(planner, s.cooldown_nodes),
+        "warmup": warmup,
+        "approach": approach,
+        "main": main_block_line(s, planner, block_m),
+        "return": back,
+        "cooldown": cooldown,
     }
     return {k: v for k, v in legs.items() if v is not None}
 
@@ -98,7 +116,8 @@ def write(
     for rank, s in enumerate(suggestions, start=1):
         # Warm-up / cool-down not covered by the way there and back is run easy on the block.
         easy_on_block_m = max(req.warmup_m - s.warmup_m, 0) + max(req.cooldown_m - s.cooldown_m, 0)
-        legs = full_run(s, planner, main_m + easy_on_block_m)
+        laps_m = s.laps * s.lap_m
+        legs = full_run(s, planner, laps_m + easy_on_block_m)
         props = {
             "rank": rank,
             "kind": s.kind,
@@ -108,8 +127,9 @@ def write(
             "main_s_per_km": round(s.main_s / (main_m / 1000), 1),
             "warmup_m": round(s.warmup_m),
             "cooldown_m": round(s.cooldown_m),
+            "on_the_way_m": round(s.approach_m + s.return_m),
             "easy_on_block_m": round(easy_on_block_m),
-            "total_m": round(s.warmup_m + s.cooldown_m + main_m + easy_on_block_m),
+            "total_m": round(s.warmup_m + s.cooldown_m + laps_m + easy_on_block_m),
             "score": round(s.score, 1),
         }
         for leg, line in legs.items():
