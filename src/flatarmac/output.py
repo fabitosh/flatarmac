@@ -137,13 +137,17 @@ def write(
         easy_on_block_m = max(req.warmup_m - s.warmup_m, 0) + max(req.cooldown_m - s.cooldown_m, 0)
         laps_m = s.laps * s.lap_m
         legs = full_run(s, planner, laps_m + easy_on_block_m)
+        main_legs = [legs[k] for k in MAIN_LEGS if k in legs]
+        climb_m = ascent_m(main_legs)
+        main_km = sum(line.length for line in main_legs) / 1000
         props = {
             "rank": rank,
             "kind": s.kind,
             "name": s.name,
             "lap_m": round(s.lap_m),
             "laps": round(s.laps, 1),
-            "climb_m": round(ascent_m(legs[k] for k in MAIN_LEGS if k in legs)),
+            "climb_m": round(climb_m),
+            "climb_m_per_km": round(climb_m / main_km, 1) if main_km else 0.0,
             "warmup_m": round(s.warmup_m),
             "cooldown_m": round(s.cooldown_m),
             "on_the_way_m": round(s.approach_m + s.return_m),
