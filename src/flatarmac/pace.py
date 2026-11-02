@@ -12,6 +12,9 @@ class Zone(StrEnum):
     INTERVAL = "interval"
 
 
+# Paces a continuous main block can be run at (intervals need reps, easy runs need no block).
+MAIN_ZONES = (Zone.MARATHON, Zone.THRESHOLD)
+
 # Fraction of VDOT each zone runs at. Easy uses the middle of the 62-70 % band.
 ZONE_INTENSITY = {
     Zone.EASY: 0.66,
