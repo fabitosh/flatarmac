@@ -4,6 +4,7 @@ The main block is laps of one "block": an out-and-back on part of a stroke, a lo
 or a cycle in the network), or a running track. Warm-up and cool-down are routed with relaxed
 weights. If the block is further away than the warm-up (cool-down) covers, the extra distance is
 run as part of the main block, scored with main-block weights, and fewer laps remain on the block.
+If it is closer, the rest of the warm-up (cool-down) is run on the block with relaxed weights.
 """
 
 import itertools
@@ -115,11 +116,13 @@ class Block:
     kind: str  # out_and_back | loop | track
     lap_m: float
     lap_s: float  # main-block penalty per lap
+    turn_s: float  # part of lap_s from turns and junctions
     nodes: np.ndarray  # network nodes where the block can be joined
     edges: list[tuple[int, bool]] = field(default_factory=list)  # (edge_id, forward), one way
     geometry: shapely.LineString | None = None  # tracks only
     access_m: float = 0.0  # tracks: connector from the network
     name: str | None = None
+    easy_s: float = 0.0  # penalty per lap with warm-up / cool-down weights
 
     @property
     def band(self) -> str:
@@ -133,7 +136,7 @@ class Suggestion:
     lap_m: float
     laps: float
     main_s: float  # main-block penalty: laps + parts run on the way
-    warmup_s: float
+    warmup_s: float  # incl. the part of the warm-up run on the block
     cooldown_s: float
     warmup_m: float  # distance from start to the block
     cooldown_m: float  # distance from the block to the end
@@ -258,8 +261,9 @@ class Planner:
 
             if group["closed"].iloc[0]:
                 if length.sum() >= MIN_LOOP_M:
+                    turn_s = np.nansum(turn)
                     blocks.append(
-                        Block("loop", length.sum(), cost.sum() + np.nansum(turn), nodes, edges)
+                        Block("loop", length.sum(), cost.sum() + turn_s, turn_s, nodes, edges)
                     )
                 continue
 
@@ -270,13 +274,14 @@ class Planner:
             turn_at = np.concatenate([[0.0], np.nan_to_num(turn[:-1]), [0.0]])
             cum_turn = np.cumsum(turn_at)
 
-            best: dict[int, tuple[float, int, int, float, float]] = {}
+            best: dict[int, tuple[float, int, int, float, float, float]] = {}
             for i in range(k):
                 j = np.arange(i + 1, k + 1)
                 stretch = cum_len[j] - cum_len[i]
-                one_way = cum_cost[j] - cum_cost[i] + cum_turn[j - 1] - cum_turn[i]
+                one_way_turn = cum_turn[j - 1] - cum_turn[i]
                 lap_m = 2 * stretch
-                lap_s = 2 * one_way + 2 * u_turn
+                lap_turn = 2 * one_way_turn + 2 * u_turn
+                lap_s = 2 * (cum_cost[j] - cum_cost[i]) + lap_turn
                 # Best access anywhere on the section: running min of transit over nodes i..j.
                 access = np.minimum.accumulate(transit[i:])[1:]
                 score = lap_s * req.main_m / lap_m + access
@@ -285,9 +290,11 @@ class Planner:
                 for band in np.unique(band_of[ok]):
                     m = int(np.argmin(np.where(ok & (band_of == band), score, np.inf)))
                     if np.isfinite(score[m]) and score[m] < best.get(band, (np.inf,))[0]:
-                        best[band] = (score[m], i, int(j[m]), lap_m[m], lap_s[m])
-            for _, i, j, lap_m, lap_s in best.values():
-                blocks.append(Block("out_and_back", lap_m, lap_s, nodes[i : j + 1], edges[i:j]))
+                        best[band] = (score[m], i, int(j[m]), lap_m[m], lap_s[m], lap_turn[m])
+            for _, i, j, lap_m, lap_s, lap_turn in best.values():
+                blocks.append(
+                    Block("out_and_back", lap_m, lap_s, lap_turn, nodes[i : j + 1], edges[i:j])
+                )
         return blocks
 
     def _track_blocks(self, req: Request) -> list[Block]:
@@ -296,6 +303,7 @@ class Planner:
                 kind="track",
                 lap_m=t.lap_m,
                 lap_s=getattr(t, f"cost_{req.mode}"),
+                turn_s=0.0,
                 nodes=np.array([t.access_node]),
                 geometry=t.geometry,
                 access_m=t.access_m,
@@ -343,15 +351,17 @@ class Planner:
             ring_edges[len(left) - 1] = int(edge)  # the closing edge, not a parallel one
             nodes = ring[:-1]
             incoming = ring_edges[-1:] + ring_edges[:-1]
-            lap_s = main_cost[ring_edges].sum() + sum(
+            turn_s = sum(
                 self.turn_s.get(key, 0.0) for key in zip(nodes, incoming, ring_edges, strict=True)
             )
+            lap_s = main_cost[ring_edges].sum() + turn_s
             forward = [u_arr[x] == a for a, x in zip(nodes, ring_edges, strict=True)]
             blocks.append(
                 Block(
                     "loop",
                     float(total),
                     float(lap_s),
+                    float(turn_s),
                     np.array(nodes),
                     list(zip(ring_edges, forward, strict=True)),
                 )
@@ -360,6 +370,15 @@ class Planner:
 
     # --- evaluation ------------------------------------------------------------------------------
 
+    @staticmethod
+    def _easy_lap_s(block: Block, easy_edge: np.ndarray) -> float:
+        """Penalty of one lap with warm-up / cool-down weights."""
+        if block.kind == "track":
+            return TRANSIT.surface * block.lap_s  # track cost is surface (+ negligible gradient)
+        runs = 2 if block.kind == "out_and_back" else 1
+        edge_ids = [e for e, _ in block.edges]
+        return runs * float(easy_edge[edge_ids].sum()) + TRANSIT.stops * block.turn_s
+
     def _evaluate(self, block: Block, req: Request, wu: Transit, cd: Transit) -> Suggestion | None:
         nodes = block.nodes
         wu_budget = req.warmup_m - block.access_m
@@ -367,9 +386,16 @@ class Planner:
         on_the_way = wu.excess_m(nodes, wu_budget) + cd.excess_m(nodes, cd_budget)
         feasible = on_the_way <= MAX_ON_THE_WAY * req.main_m  # also False when unreachable
         laps_m = np.where(feasible, req.main_m - on_the_way, 0.0)
+        # Warm-up / cool-down the way to the block doesn't cover is run on the block.
+        easy_per_m = block.easy_s / block.lap_m
+        wu_s = wu.leg_s(nodes, req.warmup_m) + easy_per_m * np.maximum(
+            wu_budget - wu.dist_m[nodes], 0
+        )
+        cd_s = cd.leg_s(nodes, req.cooldown_m) + easy_per_m * np.maximum(
+            cd_budget - cd.dist_m[nodes], 0
+        )
         # Track connectors (<= 100 m) are ignored in the penalty split.
-        transit = wu.leg_s(nodes, req.warmup_m) + cd.leg_s(nodes, req.cooldown_m)
-        score = np.where(feasible, block.lap_s * laps_m / block.lap_m + transit, np.inf)
+        score = np.where(feasible, block.lap_s * laps_m / block.lap_m + wu_s + cd_s, np.inf)
         if not np.isfinite(score).any():
             return None
         best = int(np.argmin(score))
@@ -380,8 +406,8 @@ class Planner:
             lap_m=float(block.lap_m),
             laps=float(laps_m[best] / block.lap_m),
             main_s=float(block.lap_s * laps_m[best] / block.lap_m),
-            warmup_s=float(wu.leg_s(node, req.warmup_m)),
-            cooldown_s=float(cd.leg_s(node, req.cooldown_m)),
+            warmup_s=float(wu_s[best]),
+            cooldown_s=float(cd_s[best]),
             warmup_m=float(wu.dist_m[node] + block.access_m),
             cooldown_m=float(cd.dist_m[node] + block.access_m),
             approach_m=float(wu.excess_m(node, wu_budget)),
@@ -466,6 +492,9 @@ class Planner:
             + self._cycle_blocks(req, start, limit_s)
             + self._track_blocks(req)
         )
+        easy_edge = edge_penalty_s(self.edges, req.mode, TRANSIT).to_numpy()
+        for block in blocks:
+            block.easy_s = self._easy_lap_s(block, easy_edge)
         scored = [(s, b) for b in blocks if (s := self._evaluate(b, req, wu, cd)) is not None]
 
         picked = []
