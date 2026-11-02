@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>flatarmac</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <style>
+    :root {
+      --surface: #fcfcfb;
+      --ink: #1f1f1d;
+      --ink-muted: #6b6b66;
+      --border: #e2e1dd;
+      --junction: #eb6834;
+    }
+    html, body { margin: 0; height: 100%; background: var(--surface); color: var(--ink);
+      font: 13px/1.4 system-ui, -apple-system, sans-serif; }
+    #map { position: absolute; inset: 0; }
+    .panel { position: absolute; top: 12px; left: 12px; z-index: 1; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; max-width: 260px;
+      box-shadow: 0 1px 4px rgb(0 0 0 / 8%); }
+    .panel h1 { font-size: 14px; margin: 0 0 6px; }
+    .panel p { margin: 0 0 8px; color: var(--ink-muted); }
+    .modes { display: flex; gap: 4px; margin-bottom: 10px; }
+    .modes button { flex: 1; border: 1px solid var(--border); background: var(--surface);
+      border-radius: 6px; padding: 4px 6px; cursor: pointer; color: var(--ink); font: inherit; }
+    .modes button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+    .legend-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+    .swatch { width: 28px; border-radius: 2px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--junction);
+      box-shadow: 0 0 0 2px var(--surface); margin: 0 9px; }
+    .maplibregl-popup-content { font: 12px/1.45 system-ui, sans-serif; color: var(--ink); }
+    .maplibregl-popup-content table { border-collapse: collapse; }
+    .maplibregl-popup-content td { padding: 0 6px 0 0; }
+    .maplibregl-popup-content td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { color: var(--ink-muted); }
+    @media (max-width: 480px) { .panel { left: 8px; right: 8px; max-width: none; } }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="panel">
+    <h1>Main-block runnability</h1>
+    <p>Penalty per km for a flat, uninterrupted main block. Darker and thicker is better.</p>
+    <div class="modes" role="group" aria-label="Surface mode">
+      <button data-mode="tarmac" aria-pressed="true">Tarmac</button>
+      <button data-mode="firm_natural" aria-pressed="false">Firm natural</button>
+    </div>
+    <div id="legend"></div>
+    <div class="legend-row"><span class="dot"></span><span>Junction delay (size = seconds)</span></div>
+  </div>
+  <script>
+    const region = new URLSearchParams(location.search).get("region") || "zurich";
+    const dataUrl = (name) => `../data/${region}/web/${name}.geojson`;
+
+    // Sequential blue, dark = low penalty (good). Upper bounds in s/km.
+    const BINS = [
+      { max: 5, color: "#0d366b", width: 4, label: "< 5 s/km" },
+      { max: 15, color: "#1c5cab", width: 3, label: "5–15" },
+      { max: 40, color: "#3987e5", width: 2.2, label: "15–40" },
+      { max: 100, color: "#86b6ef", width: 1.5, label: "40–100" },
+      { max: Infinity, color: "#cde2fb", width: 1, label: "> 100" },
+    ];
+
+    document.getElementById("legend").innerHTML = BINS.map((b) =>
+      `<div class="legend-row"><span class="swatch" style="height:${b.width}px;background:${b.color}"></span>${b.label}</div>`
+    ).join("");
+
+    const step = (prop, key) => {
+      const expr = ["step", ["get", prop], BINS[0][key]];
+      BINS.slice(0, -1).forEach((b, i) => expr.push(b.max, BINS[i + 1][key]));
+      return expr;
+    };
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: "https://vectortiles.geo.admin.ch/styles/ch.swisstopo.lightbasemap.vt/style.json",
+      center: [8.54, 47.375],
+      zoom: 13,
+      hash: true,
+    });
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+    let mode = "tarmac";
+    const setMode = (next) => {
+      mode = next;
+      document.querySelectorAll(".modes button").forEach((b) =>
+        b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+      if (!map.getLayer("edges")) return;
+      const prop = `s_per_km_${mode}`;
+      map.setPaintProperty("edges", "line-color", step(prop, "color"));
+      map.setPaintProperty("edges", "line-width", step(prop, "width"));
+      // Draw best edges on top.
+      map.setLayoutProperty("edges", "line-sort-key", ["-", 0, ["get", prop]]);
+    };
+    document.querySelectorAll(".modes button").forEach((b) =>
+      b.addEventListener("click", () => setMode(b.dataset.mode)));
+
+    map.on("load", () => {
+      map.addSource("edges", { type: "geojson", data: dataUrl("edges") });
+      map.addSource("junctions", { type: "geojson", data: dataUrl("junctions") });
+      map.addLayer({
+        id: "edges", type: "line", source: "edges",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": BINS[0].color, "line-width": 2 },
+      });
+      map.addLayer({
+        id: "junctions", type: "circle", source: "junctions", minzoom: 13,
+        paint: {
+          "circle-color": "#eb6834",
+          "circle-radius": ["interpolate", ["linear"], ["get", "through_s"], 0, 3, 30, 9],
+          "circle-stroke-color": "#fcfcfb",
+          "circle-stroke-width": 2,
+        },
+      });
+      setMode(mode);
+    });
+
+    const fmt = (v) => (v == null ? "–" : Number(v).toFixed(1));
+    const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "280px" });
+
+    map.on("mousemove", "edges", (e) => {
+      map.getCanvas().style.cursor = "pointer";
+      const p = e.features[0].properties;
+      const rows = [
+        ["Penalty", `${fmt(p[`s_per_km_${mode}`])} s/km`],
+        ["Length", `${fmt(p.length_m)} m`],
+        ["Ascent", `${fmt(p.ascent_m)} m`],
+        ["Max grade", `${fmt(p.max_grade_pct)} %`],
+        ["Gradient", `${fmt(p.gradient_s)} s`],
+        ["Surface", `${fmt(p[`surface_s_${mode}`])} s`],
+        ["Traffic", `${fmt(p.traffic_s)} s`],
+        ["Stairs", `${fmt(p.obstacle_s)} s`],
+        ["Stops", `${fmt(p.stops_s)} s`],
+      ];
+      popup.setLngLat(e.lngLat).setHTML(
+        `<strong>${p.name && p.name !== "null" ? p.name : p.objektart}</strong>
+         <div class="muted">${p.objektart} · ${p.belagsart} · ${p.kunstbaute}</div>
+         <table>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${v}</td></tr>`).join("")}</table>`
+      ).addTo(map);
+    });
+    map.on("mousemove", "junctions", (e) => {
+      const p = e.features[0].properties;
+      popup.setLngLat(e.lngLat).setHTML(
+        `<strong>Junction</strong><div class="muted">${p.control === "null" ? "no OSM control" : p.control} · degree ${p.degree}</div>
+         <table><tr><td>Through delay</td><td class="num">${fmt(p.through_s)} s</td></tr></table>`
+      ).addTo(map);
+    });
+    for (const layer of ["edges", "junctions"]) {
+      map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; popup.remove(); });
+    }
+  </script>
+</body>
+</html>

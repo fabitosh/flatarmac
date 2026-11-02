@@ -10,13 +10,14 @@ MIN_NODE_S = 2.0
 
 
 def main_block_s(edges: gpd.GeoDataFrame, mode: SurfaceMode):
+    """Length-proportional penalties only. Point stops are shown separately: spread over a short
+    edge they would dominate its per-km value."""
     w = MAIN
     return (
         w.gradient * edges["gradient_s"]
         + w.surface * edges[f"surface_s_{mode}"]
         + w.traffic * edges["traffic_s"]
         + w.obstacles * edges["obstacle_s"]
-        + w.stops * edges["stops_s"]
     )
 
 
