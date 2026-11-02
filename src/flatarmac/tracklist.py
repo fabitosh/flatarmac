@@ -24,6 +24,13 @@ SPORTS = {"running", "athletics"}
 MIN_M, MAX_M = 200.0, 2000.0
 # 4πA/P²: circle 1, stadium oval ~0.75, outline of a 100 m sprint strip ~0.25.
 MIN_ROUNDNESS = 0.45
+# Forest loops (Finnenbahn, Vita parcours) are soft and hilly: not for track workouts.
+TRAIL_SURFACES = {"woodchips", "wood", "bark", "grass", "dirt", "ground"}
+TRAIL_NAMES = ("finnenbahn", "vita")
+
+
+def is_trail_loop(name: str, surface: str) -> bool:
+    return surface in TRAIL_SURFACES or any(n in name.lower() for n in TRAIL_NAMES)
 
 
 def csv_path(region: Region) -> Path:
@@ -115,10 +122,7 @@ def refresh(region: Region, extra_ids: list[tuple[str, int]] = ()) -> pd.DataFra
                 continue
             sport_ok = bool(SPORTS & set(tags.get("sport", "").split(";")))
             roundness = 4 * math.pi * shapely.Polygon(ring_lv95).area / ring_m**2
-            # Forest woodchip loops (Finnenbahnen) are irregular but real loops.
-            forest_loop = tags.get("surface") == "woodchips" or "finnenbahn" in (
-                tags.get("name", "").lower()
-            )
+            trail = is_trail_loop(tags.get("name", ""), tags.get("surface", ""))
             lap_m = _default_lap(tags, ring_m)
             new_rows.append(
                 {
@@ -130,9 +134,10 @@ def refresh(region: Region, extra_ids: list[tuple[str, int]] = ()) -> pd.DataFra
                     "include": sport_ok
                     and MIN_M <= min(ring_m, lap_m)
                     and ring_m <= MAX_M
-                    and (roundness >= MIN_ROUNDNESS or forest_loop),
+                    and roundness >= MIN_ROUNDNESS
+                    and not trail,
                     "note": f"ring {ring_m:.0f} m; roundness {roundness:.2f}; "
-                    f"sport={tags.get('sport', '')}",
+                    f"sport={tags.get('sport', '')}" + ("; trail loop" if trail else ""),
                 }
             )
 
