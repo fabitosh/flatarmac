@@ -41,6 +41,14 @@ def profile(line: shapely.LineString) -> Profile:
     return Profile(distance, z, grade)
 
 
+def drape(line: shapely.LineString, dem) -> shapely.LineString:
+    """Add Z from an open rasterio DEM, sampled every SAMPLE_SPACING_M."""
+    distance = np.linspace(0, line.length, max(int(line.length / SAMPLE_SPACING_M), 1) + 1)
+    xy = shapely.get_coordinates(shapely.line_interpolate_point(line, distance))
+    z = np.array([v[0] for v in dem.sample(xy)])
+    return shapely.LineString(np.column_stack([xy, z]))
+
+
 def summarise(line: shapely.LineString) -> dict[str, float]:
     p = profile(line)
     dz = np.diff(p.z)

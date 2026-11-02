@@ -156,3 +156,16 @@ class PhaseWeights:
 
 MAIN = PhaseWeights()
 TRANSIT = PhaseWeights(gradient=0.15, stops=0.35, surface=0.5, traffic=0.5, obstacles=0.3)
+
+
+def edge_penalty_s(edges, mode: SurfaceMode, weights: PhaseWeights, include_stops: bool = True):
+    """Weighted penalty seconds per edge (excluding junction / turn costs)."""
+    total = (
+        weights.gradient * edges["gradient_s"]
+        + weights.surface * edges[f"surface_s_{mode}"]
+        + weights.traffic * edges["traffic_s"]
+        + weights.obstacles * edges["obstacle_s"]
+    )
+    if include_stops:
+        total = total + weights.stops * edges["stops_s"]
+    return total

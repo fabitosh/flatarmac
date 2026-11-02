@@ -3,7 +3,7 @@
 import geopandas as gpd
 import pandas as pd
 
-from flatarmac import elevation, network, stops
+from flatarmac import candidates, elevation, network, stops, strokes
 from flatarmac.config import Region
 from flatarmac.costs import STAIRS, CostModel, SurfaceMode, road_class
 
@@ -56,6 +56,13 @@ def build(region: Region, model: CostModel | None = None) -> None:
     turns = stops.turn_table(edges, nodes["control"], model)
     nodes["through_s"] = through_cost(turns).reindex(nodes["node_id"]).fillna(0.0).to_numpy()
 
+    stroke_table = candidates.stroke_costs(strokes.build(edges, turns), edges, turns)
+    track_table = candidates.tracks(
+        gpd.read_parquet(region.dir / "osm_tracks.parquet"), nodes, region.dir / "dem_2m.tif", model
+    )
+
     edges.to_parquet(region.dir / "edges.parquet")
     nodes.to_parquet(region.dir / "nodes.parquet")
     turns.to_parquet(region.dir / "turns.parquet")
+    stroke_table.to_parquet(region.dir / "strokes.parquet")
+    track_table.to_parquet(region.dir / "tracks.parquet")
