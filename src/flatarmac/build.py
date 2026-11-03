@@ -56,9 +56,16 @@ def through_cost(turns: pd.DataFrame) -> pd.Series:
     return straight.combine_first(any_move)
 
 
+def closed_roads(region: Region) -> set[str]:
+    """TLM uuids from `curated/closures_<region>.csv`: roads mapped as open that are not."""
+    path = tracklist.CURATED_DIR / f"closures_{region.name}.csv"
+    return set(pd.read_csv(path)["tlm_uuid"]) if path.exists() else set()
+
+
 def build(region: Region, model: CostModel | None = None) -> None:
     model = model or CostModel()
     roads = gpd.read_parquet(region.dir / "tlm_roads.parquet")
+    roads = roads[~roads["uuid"].isin(closed_roads(region))]
     osm_stops = gpd.read_parquet(region.dir / "osm_stops.parquet")
 
     edges, nodes = network.build(roads)

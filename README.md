@@ -46,6 +46,12 @@ uv run flatarmac tracks --discover          # query Overpass for leisure=track (
 uv run flatarmac tracks --add relation/123  # add one by OSM id
 ```
 
+## Closed roads
+
+Roads the map shows as open but that are not (fenced sites, long-closed paths) go into
+`curated/closures_<region>.csv` by swissTLM3D `tlm_uuid`, with a `note` on why. The build leaves
+them out of the network.
+
 ## Data and attribution
 
 Nothing downloaded is committed; `fetch` pulls it into `data/`.
