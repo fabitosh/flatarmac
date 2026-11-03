@@ -16,10 +16,8 @@ def score_edges(edges: gpd.GeoDataFrame, osm_stops: gpd.GeoDataFrame, model: Cos
         road_class(o, v) for o, v in zip(edges["objektart"], edges["verkehrsbd"], strict=True)
     ]
 
-    profiles = [elevation.profile(g) for g in edges.geometry]
     summaries = pd.DataFrame([elevation.summarise(g) for g in edges.geometry], index=edges.index)
     edges = edges.join(summaries)
-    edges["gradient_s"] = [model.gradient.edge_seconds(p) for p in profiles]
 
     km = edges["length_m"] / 1000
     keys = [
@@ -34,6 +32,20 @@ def score_edges(edges: gpd.GeoDataFrame, osm_stops: gpd.GeoDataFrame, model: Cos
     edges["obstacle_s"] = edges["kunstbaute"].isin(STAIRS) * model.stairs_s
     edges["stops_s"] = stops.along_stops(edges, osm_stops, model)
     return edges
+
+
+def gradient_s(edges: gpd.GeoDataFrame, stroke_rows: pd.DataFrame, model: CostModel) -> pd.Series:
+    """Gradient penalty per edge, graded along its stroke so ramps at junctions average out."""
+    geometry = edges.set_index("edge_id").geometry
+    seconds = {}
+    for _, stroke in stroke_rows.sort_values(["stroke_id", "seq"]).groupby("stroke_id"):
+        lines = [
+            geometry[e] if forward else geometry[e].reverse()
+            for e, forward in zip(stroke["edge_id"], stroke["forward"], strict=True)
+        ]
+        for e, p in zip(stroke["edge_id"], elevation.chain_profiles(lines), strict=True):
+            seconds[e] = model.gradient.edge_seconds(p)
+    return edges["edge_id"].map(seconds)
 
 
 def through_cost(turns: pd.DataFrame) -> pd.Series:
@@ -56,7 +68,9 @@ def build(region: Region, model: CostModel | None = None) -> None:
     turns = stops.turn_table(edges, nodes["control"], model)
     nodes["through_s"] = through_cost(turns).reindex(nodes["node_id"]).fillna(0.0).to_numpy()
 
-    stroke_table = candidates.stroke_costs(strokes.build(edges, turns), edges, turns)
+    stroke_rows = strokes.build(edges, turns)
+    edges["gradient_s"] = gradient_s(edges, stroke_rows, model)
+    stroke_table = candidates.stroke_costs(stroke_rows, edges, turns)
     track_table = candidates.tracks(
         tracklist.included(region), nodes, region.dir / "dem_2m.tif", model
     )
