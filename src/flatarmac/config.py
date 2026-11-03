@@ -21,6 +21,8 @@ class Region:
     north_min: int
     east_max: int
     north_max: int
+    # Municipality left out of curated track names; tracks elsewhere get theirs appended.
+    city: str = ""
 
     @property
     def bbox_lv95(self) -> tuple[int, int, int, int]:
@@ -41,6 +43,6 @@ class Region:
         return DATA_DIR / self.name
 
 
-ZURICH = Region("zurich", 2_675_000, 1_238_000, 2_692_000, 1_255_000)
+ZURICH = Region("zurich", 2_675_000, 1_238_000, 2_692_000, 1_255_000, city="Zürich")
 
 REGIONS = {r.name: r for r in (ZURICH,)}

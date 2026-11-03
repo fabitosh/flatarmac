@@ -15,22 +15,87 @@ import pandas as pd
 import shapely
 
 from flatarmac.config import LV95, WGS84, Region
-from flatarmac.sources.osm import USER_AGENT, _lap_ring
+from flatarmac.sources.osm import USER_AGENT, _lap_ring, _overpass
 
 CURATED_DIR = Path(__file__).resolve().parents[2] / "curated"
 OSM_API = "https://api.openstreetmap.org/api/0.6"
 COLUMNS = ["osm_type", "osm_id", "name", "lap_m", "surface", "include", "note"]
 SPORTS = {"running", "athletics"}
 MIN_M, MAX_M = 200.0, 2000.0
-# 4πA/P²: circle 1, stadium oval ~0.75, outline of a 100 m sprint strip ~0.25.
+# 4πA/P²: circle 1, stadium oval ~0.75, elongated forest loop ~0.3, sprint strip outline ≤ 0.15.
 MIN_ROUNDNESS = 0.45
+STRIP_ROUNDNESS = 0.2
 # Forest loops (Finnenbahn, Vita parcours) are soft and hilly: not for track workouts.
 TRAIL_SURFACES = {"woodchips", "wood", "bark", "grass", "dirt", "ground"}
 TRAIL_NAMES = ("finnenbahn", "vita")
+# Track names that say what, not where ("100m Bahn"): prefixed to the site name instead.
+GENERIC_NAMES = {"finnenbahn", "vitaparcour", "vitaparcours", "rundbahn", "laufbahn", "100m bahn"}
+# Named places a track belongs to, most specific first.
+SITE_KINDS = ["stadium", "sports_centre", "recreation_ground", "school", "college", "university"]
+SITE_FILTER = '[name][~"^(leisure|landuse|amenity)$"~"^(' + "|".join(SITE_KINDS) + ')$"]'
+SITE_RADIUS_M = 150
 
 
 def is_trail_loop(name: str, surface: str) -> bool:
     return surface in TRAIL_SURFACES or any(n in name.lower() for n in TRAIL_NAMES)
+
+
+def round_lap(ring_m: float) -> float:
+    """Mapped rings are a few % off what is signposted: snap to a round 50 m if that close."""
+    fifty = round(ring_m / 50) * 50
+    return float(fifty) if abs(ring_m - fifty) <= 0.03 * fifty else float(round(ring_m / 10) * 10)
+
+
+def track_name(own: str, site: str, municipality: str, street: str, city: str) -> str:
+    """OSM name if it says where; else the school or sports ground it is in; else nearest street."""
+    if own and own.lower() not in GENERIC_NAMES:
+        name = own
+    elif own:
+        name = f"{own} {site or municipality}".strip()
+    else:
+        name = site or f"Track near {street}"
+    if municipality and municipality != city and municipality not in name:
+        name += f", {municipality}"
+    return name
+
+
+def _site_kind(tags: dict) -> int:
+    kinds = [tags.get(k) for k in ("leisure", "landuse", "amenity")]
+    return min(SITE_KINDS.index(k) for k in kinds if k in SITE_KINDS)
+
+
+def sites(points: list[shapely.Point]) -> list[tuple[str, str]]:
+    """(site, municipality) per WGS84 point: the named sports ground or school containing it,
+    else the nearest one within SITE_RADIUS_M. One Overpass request for all points."""
+    query = "[out:json][timeout:600];"
+    for p in points:
+        query += (
+            f"is_in({p.y},{p.x})->.a;"
+            f"area.a{SITE_FILTER};out tags;out count;"
+            f"nwr(around:{SITE_RADIUS_M},{p.y},{p.x}){SITE_FILTER};out tags center;out count;"
+            'area.a["admin_level"="8"];out tags;out count;'
+        )
+    groups, group = [], []
+    for e in _overpass(query):
+        if e["type"] == "count":
+            groups.append(group)
+            group = []
+        else:
+            group.append(e)
+
+    result = []
+    for i, p in enumerate(points):
+        inside, near, admin = groups[3 * i : 3 * i + 3]
+
+        def dist(e, p=p):
+            c = e.get("center", e)
+            return math.hypot((c["lon"] - p.x) * math.cos(math.radians(p.y)), c["lat"] - p.y)
+
+        best = min(inside, key=lambda e: _site_kind(e["tags"]), default=None)
+        best = best or min(near, key=dist, default=None)
+        site = best["tags"]["name"] if best else ""
+        result.append((site, admin[0]["tags"]["name"] if admin else ""))
+    return result
 
 
 def csv_path(region: Region) -> Path:
@@ -72,10 +137,18 @@ def _default_lap(tags: dict, ring_m: float) -> float:
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(m)?\s*", tags.get("length", ""))
     if match:
         return float(match[1])
-    # Athletics rings are mapped somewhere between lane-1 kerb and outer edge.
-    if "athletics" in tags.get("sport", "") and 360 <= ring_m <= 480:
+    # 400 m ovals are mapped somewhere between lane-1 kerb and outer edge, as sport=athletics
+    # or sport=running alike.
+    trail = is_trail_loop(tags.get("name", ""), tags.get("surface", ""))
+    if not trail and 360 <= ring_m <= 480:
         return 400.0
-    return round(ring_m / 5) * 5
+    return round_lap(ring_m)
+
+
+def _strip_m(ring_lv95) -> float:
+    """Length of a sprint strip: the long side of its outline's bounding rectangle."""
+    rect = shapely.Polygon(ring_lv95).minimum_rotated_rectangle.exterior.coords
+    return max(math.dist(rect[0], rect[1]), math.dist(rect[1], rect[2]))
 
 
 def refresh(region: Region, extra_ids: list[tuple[str, int]] = ()) -> pd.DataFrame:
@@ -102,10 +175,10 @@ def refresh(region: Region, extra_ids: list[tuple[str, int]] = ()) -> pd.DataFra
     named = edges[edges["name"].notna()].reset_index(drop=True)
     named_tree = shapely.STRtree(named.geometry.values)
 
-    def nearby_name(ring_lv95) -> str:
-        return f"Track near {named['name'].iloc[named_tree.nearest(ring_lv95.centroid)]}"
+    def nearby_street(ring_lv95) -> str:
+        return named["name"].iloc[named_tree.nearest(ring_lv95.centroid)]
 
-    new_rows, new_rings = [], []
+    new_rows, new_rings, centroids = [], [], []
     with httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=60) as client:
         for osm_type, osm_id in sorted(candidates | known):
             if (osm_type, osm_id) in cached and (osm_type, osm_id) in known:
@@ -123,23 +196,38 @@ def refresh(region: Region, extra_ids: list[tuple[str, int]] = ()) -> pd.DataFra
             sport_ok = bool(SPORTS & set(tags.get("sport", "").split(";")))
             roundness = 4 * math.pi * shapely.Polygon(ring_lv95).area / ring_m**2
             trail = is_trail_loop(tags.get("name", ""), tags.get("surface", ""))
-            lap_m = _default_lap(tags, ring_m)
+            # A thin outline is no lap anyone runs: a sprint strip if it goes around once,
+            # else something odd like a track drawn as one line along both edges.
+            thin = roundness < STRIP_ROUNDNESS
+            lap_m = None if thin else _default_lap(tags, ring_m)
+            note = f"ring {ring_m:.0f} m; roundness {roundness:.2f}; sport={tags.get('sport', '')}"
+            if thin and ring_m < 2.5 * (strip_m := _strip_m(ring_lv95)):
+                note += f"; sprint strip ~{strip_m:.0f} m, not a loop"
+            elif thin:
+                note += f"; thin outline ~{strip_m:.0f} m long, lap unclear"
+            centroids.append(ring.centroid)
             new_rows.append(
                 {
                     "osm_type": osm_type,
                     "osm_id": osm_id,
-                    "name": tags.get("name") or nearby_name(ring_lv95),
+                    "name": (tags.get("name", ""), nearby_street(ring_lv95)),
                     "lap_m": lap_m,
                     "surface": tags.get("surface", ""),
                     "include": sport_ok
+                    and not thin
                     and MIN_M <= min(ring_m, lap_m)
                     and ring_m <= MAX_M
                     and roundness >= MIN_ROUNDNESS
                     and not trail,
-                    "note": f"ring {ring_m:.0f} m; roundness {roundness:.2f}; "
-                    f"sport={tags.get('sport', '')}" + ("; trail loop" if trail else ""),
+                    "note": note + ("; trail loop" if trail else ""),
                 }
             )
+
+    for row, (site, municipality) in zip(
+        new_rows, sites(centroids) if centroids else [], strict=True
+    ):
+        own, street = row["name"]
+        row["name"] = track_name(own, site, municipality, street, region.city)
 
     if new_rings:
         fresh = gpd.GeoDataFrame(new_rings, crs=WGS84).to_crs(LV95)
