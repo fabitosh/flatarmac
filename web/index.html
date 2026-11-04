@@ -36,7 +36,10 @@
     .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
     .field { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 6px; margin: 6px 0; }
     .field label { color: var(--ink-muted); }
-    .field .inputs { display: flex; gap: 4px; min-width: 0; }
+    .field .inputs { display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .field .inputs .seg { flex: 1; }
+    .field.hint { margin-top: -2px; }
+    .field[hidden] { display: none; }
     input, select { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--border);
       border-radius: 6px; padding: 3px 6px; min-width: 0; }
     input[type="number"] { width: 56px; }
@@ -59,13 +62,30 @@
     .key.transit { border-top: 3px dotted var(--ink); }
     .key.track { width: 14px; height: 10px; border: 3px solid var(--track); border-radius: 6px; }
     summary { cursor: pointer; font-weight: 600; }
-    .route { display: block; width: 100%; text-align: left; border: 1px solid var(--border);
-      background: var(--surface); border-radius: 6px; padding: 6px 8px; margin: 0 0 4px;
-      cursor: pointer; font: inherit; color: var(--ink); }
+    .routes-head, .route { display: grid; grid-template-columns: 20px 1fr 40px 64px 20px;
+      align-items: center; column-gap: 8px; }
+    .routes-head { padding: 0 9px 3px; font-size: 11px; color: var(--ink-muted); }
+    .routes-head .num, .route .num { text-align: right; }
+    .route { width: 100%; text-align: left; border: 1px solid var(--border);
+      background: var(--surface); border-radius: 6px; padding: 5px 8px; margin: 0 0 3px;
+      cursor: pointer; font: inherit; color: var(--ink); font-variant-numeric: tabular-nums; }
+    .route:hover { border-color: var(--ink-muted); }
     .route[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
-    .route.track { border-left: 4px solid var(--track); }
-    .route .stats { color: var(--ink-muted); font-variant-numeric: tabular-nums; }
-    .route a { color: var(--ink); }
+    .route svg { display: block; width: 20px; height: 20px; fill: none; stroke: currentColor;
+      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .route.track .kind { color: var(--track); }
+    .route .score { font-weight: 600; }
+    .route .unit { color: var(--ink-muted); font-size: 11px; }
+    .route a { color: var(--ink-muted); display: flex; justify-content: flex-end; }
+    .route a:hover { color: var(--ink); }
+    .route a svg { width: 16px; height: 16px; }
+    #tip { position: fixed; z-index: 2; pointer-events: none; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 200px;
+      box-shadow: 0 1px 4px rgb(0 0 0 / 12%); font-size: 12px; }
+    #tip[hidden] { display: none; }
+    #tip table { border-collapse: collapse; width: 100%; margin-top: 3px; }
+    #tip td { padding: 0; color: var(--ink-muted); }
+    #tip td.num { text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
     .maplibregl-popup-content { font: 12px/1.45 system-ui, sans-serif; color: var(--ink); }
     .maplibregl-popup-content table { border-collapse: collapse; }
     .maplibregl-popup-content td { padding: 0 6px 0 0; }
@@ -86,6 +106,8 @@
 
     <section id="plan">
       <h2>Plan a run</h2>
+      <div class="field"><label for="five-k">5k race</label>
+        <div class="inputs"><input id="five-k" type="text" value="18:13" pattern="\d{1,2}:\d{2}"> <span class="muted">mm:ss</span></div></div>
       <div class="field"><label>Start</label>
         <div class="point" id="start-label">Click the map</div></div>
       <div class="field"><label>Finish</label>
@@ -93,21 +115,21 @@
       <div class="field"><label for="main-value">Main block</label>
         <div class="inputs">
           <input id="main-value" type="number" min="1" step="1" value="25">
-          <select id="main-unit"><option value="min">min</option><option value="km">km</option></select>
+          <div class="seg" role="group" aria-label="Main block unit">
+            <button data-unit="min" aria-pressed="true" type="button">min</button>
+            <button data-unit="km" aria-pressed="false" type="button">km</button>
+          </div>
         </div></div>
-      <div class="field"><label for="main-zone">Main pace</label>
-        <div class="inputs">
-          <select id="main-zone">
-            <option value="threshold">threshold</option><option value="marathon">marathon</option>
-            <option value="interval">interval</option><option value="easy">easy</option>
-          </select>
+      <div class="field" id="zone-field"><label>Main pace</label>
+        <div class="seg" role="group" aria-label="Main pace">
+          <button data-zone="marathon" aria-pressed="false" type="button">Marathon</button>
+          <button data-zone="threshold" aria-pressed="true" type="button">Threshold</button>
         </div></div>
+      <div class="field hint" id="main-hint"><span></span><span class="muted"></span></div>
       <div class="field"><label for="warmup">Warm-up</label>
-        <div class="inputs"><input id="warmup" type="number" min="0" step="1" value="15"> <span class="muted">min</span></div></div>
+        <div class="inputs"><input id="warmup" type="number" min="0" step="1" value="15"> <span class="muted">min <span id="warmup-km" title="On the flat; climbs shorten it"></span></span></div></div>
       <div class="field"><label for="cooldown">Cool-down</label>
-        <div class="inputs"><input id="cooldown" type="number" min="0" step="1" value="10"> <span class="muted">min</span></div></div>
-      <div class="field"><label for="five-k">5k race</label>
-        <div class="inputs"><input id="five-k" type="text" value="18:13" pattern="\d{1,2}:\d{2}"> <span class="muted">mm:ss</span></div></div>
+        <div class="inputs"><input id="cooldown" type="number" min="0" step="1" value="10"> <span class="muted">min <span id="cooldown-km" title="On the flat; climbs shorten it"></span></span></div></div>
       <div class="field"><label>Surface</label>
         <div class="seg" role="group" aria-label="Surface mode">
           <button data-mode="tarmac" aria-pressed="true" type="button">Tarmac</button>
@@ -118,6 +140,7 @@
     </section>
 
     <section id="routes"></section>
+    <div id="tip" hidden></div>
 
     <details>
       <summary>Map legend</summary>
@@ -137,6 +160,16 @@
     const routesDir = `../data/${region}/routes`;
     const km = (m) => (m / 1000).toFixed(1);
     const fmt = (v) => (v == null ? "–" : Number(v).toFixed(1));
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+
+    const svg = (d) => `<svg viewBox="0 0 24 24" aria-hidden="true">${d}</svg>`;
+    const ICONS = {
+      out_and_back: svg(`<path d="M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4"/>`),
+      loop: svg(`<path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v4h-4"/>`),
+      track: svg(`<rect x="2.5" y="6" width="19" height="12" rx="6"/><rect x="7" y="10" width="10" height="4" rx="2"/>`),
+      download: svg(`<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>`),
+    };
+    const KIND_LABEL = { out_and_back: "Out and back", loop: "Loop", track: "Running track" };
 
     // Sequential blue, dark = high score (good). Lower bounds of the 0–100 score, best first.
     const BINS = [
@@ -216,11 +249,55 @@
     endMarker.on("dragend", () => { end = endMarker.getLngLat(); renderPoints(); });
     renderPoints();
 
+    // --- workout ---
+    // Minutes become distances with paces from the 5k time (easy for warm-up / cool-down).
+    let unit = "min", zone = "threshold", paces = null;
+    const $ = (id) => document.getElementById(id);
+    const pressed = (attr, value) => document.querySelectorAll(`[data-${attr}]`).forEach((b) =>
+      b.setAttribute("aria-pressed", String(b.dataset[attr] === value)));
+    const minToM = (min, z) => (paces ? (min * 60) / paces[z] * 1000 : null);
+    const pace = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}/km`;
+
+    function renderWorkout() {
+      $("zone-field").hidden = unit !== "min";
+      $("main-hint").hidden = unit !== "min" || !paces;
+      if (paces) {
+        $("main-hint").lastElementChild.textContent =
+          `≈ ${km(minToM(+$("main-value").value, zone))} km at ${pace(paces[zone])}`;
+      }
+      for (const id of ["warmup", "cooldown"]) {
+        $(`${id}-km`).textContent = paces ? `≈ ${km(minToM(+$(id).value, "easy"))} km` : "";
+      }
+    }
+    async function loadPaces() {
+      const fiveK = $("five-k");
+      if (!fiveK.checkValidity()) return;
+      try {
+        const res = await fetch(`/api/paces?five_k=${encodeURIComponent(fiveK.value)}`);
+        paces = res.ok ? await res.json() : null;
+      } catch { paces = null; }
+      renderWorkout();
+    }
+    document.querySelectorAll("[data-unit]").forEach((b) => b.addEventListener("click", () => {
+      if (b.dataset.unit === unit) return;
+      // Keep the workout the same size when switching units.
+      const value = $("main-value");
+      if (paces) {
+        value.value = b.dataset.unit === "km"
+          ? km(minToM(+value.value, zone))
+          : Math.round(+value.value * paces[zone] / 60);
+      }
+      value.step = b.dataset.unit === "km" ? "0.1" : "1";
+      unit = b.dataset.unit; pressed("unit", unit); renderWorkout();
+    }));
+    document.querySelectorAll("[data-zone]").forEach((b) => b.addEventListener("click", () => {
+      zone = b.dataset.zone; pressed("zone", zone); renderWorkout();
+    }));
+    for (const id of ["main-value", "warmup", "cooldown"]) $(id).addEventListener("input", renderWorkout);
+    $("five-k").addEventListener("input", loadPaces);
+    loadPaces();
+
     // --- planning ---
-    const zoneField = document.getElementById("main-zone");
-    document.getElementById("main-unit").addEventListener("change", (e) => {
-      zoneField.disabled = e.target.value !== "min";
-    });
 
     async function plan() {
       const status = document.getElementById("status");
@@ -230,8 +307,8 @@
         start: [start.lat, start.lng],
         end: end ? [end.lat, end.lng] : null,
         main_value: +document.getElementById("main-value").value,
-        main_unit: document.getElementById("main-unit").value,
-        main_zone: zoneField.value,
+        main_unit: unit,
+        main_zone: zone,
         warmup_min: +document.getElementById("warmup").value,
         cooldown_min: +document.getElementById("cooldown").value,
         five_k: document.getElementById("five-k").value,
@@ -246,8 +323,7 @@
         }
         const out = await res.json();
         if (!res.ok) throw new Error(out.detail?.[0]?.msg || out.detail || res.statusText);
-        const s = out.summary;
-        status.textContent = `Main ${km(s.main_m)} km · warm-up ${km(s.warmup_m)} km · cool-down ${km(s.cooldown_m)} km · easy ${s.easy_pace}`;
+        status.textContent = ""; // distances are shown next to the inputs
         renderRoutes(out.geojson, out.name);
       } catch (err) {
         status.className = "error"; status.textContent = err.message;
@@ -300,19 +376,51 @@
       const box = document.getElementById("routes");
       if (!byRank.size) { box.innerHTML = `<h2>Suggestions</h2><p>No routes found nearby.</p>`; return; }
       const bust = Date.now();
-      box.innerHTML = `<h2>Suggestions</h2>` + [...byRank.values()].map((p) => `
-        <button class="route ${p.kind}" data-rank="${p.rank}" aria-pressed="false" type="button">
-          <strong>${p.rank}. ${p.name}</strong>
-          <div class="stats">${p.kind.replaceAll("_", " ")} · lap ${p.lap_m} m × ${p.laps}</div>
-          <div class="stats">score ${p.score} · climb ${p.climb_m} m · to block ${km(p.warmup_m)} km · total ${km(p.total_m)} km</div>
-          ${p.on_the_way_m > 0 ? `<div class="stats">${km(p.on_the_way_m)} km of the main block on the way</div>` : ""}
-          <a href="${routesDir}/${name}_${p.rank}.gpx?v=${bust}" download="flatarmac_${p.rank}.gpx">GPX</a>
+      box.innerHTML = `<h2>Suggestions</h2>
+        <div class="routes-head"><span></span><span>Lap</span><span class="num">Score</span><span class="num">Climb</span><span></span></div>` +
+        [...byRank.values()].map((p) => `
+        <button class="route ${p.kind}" data-rank="${p.rank}" aria-pressed="false" type="button"
+          aria-label="${KIND_LABEL[p.kind]}, lap ${km(p.lap_m)} km, score ${p.score}, climb ${p.climb_m_per_km} metres per km">
+          <span class="kind">${ICONS[p.kind]}</span>
+          <span>${km(p.lap_m)} <span class="unit">km</span></span>
+          <span class="num score">${p.score}</span>
+          <span class="num">${fmt(p.climb_m_per_km)} <span class="unit">m/km</span></span>
+          <a href="${routesDir}/${name}_${p.rank}.gpx?v=${bust}" download="flatarmac_${p.rank}.gpx"
+            title="Download GPX" aria-label="Download GPX">${ICONS.download}</a>
         </button>`).join("");
-      box.querySelectorAll(".route").forEach((b) => b.addEventListener("click", (e) => {
-        if (e.target.tagName !== "A") selectRoute(+b.dataset.rank, data);
-      }));
+      box.querySelectorAll(".route").forEach((b) => {
+        const p = byRank.get(+b.dataset.rank);
+        b.addEventListener("click", (e) => {
+          if (!e.target.closest("a")) selectRoute(p.rank, data);
+        });
+        b.addEventListener("mouseenter", () => showTip(b, p));
+        b.addEventListener("focus", () => showTip(b, p));
+        b.addEventListener("mouseleave", hideTip);
+        b.addEventListener("blur", hideTip);
+      });
       selectRoute(1, data);
     }
+
+    // Details beside the panel; the row itself only carries what the map doesn't show.
+    const tip = document.getElementById("tip");
+    function showTip(row, p) {
+      if (window.innerWidth <= 480) return;
+      const rows = [
+        ["Laps", `${p.laps} × ${km(p.lap_m)} km`],
+        ["To the block", `${km(p.warmup_m)} km`],
+        ...(p.on_the_way_m > 0 ? [["Main pace on the way", `${km(p.on_the_way_m)} km`]] : []),
+        ["Climb, main block", `${p.climb_m} m`],
+        ["Total", `${km(p.total_m)} km`],
+      ];
+      tip.innerHTML = `<strong>${esc(p.name)}</strong><div class="muted">${KIND_LABEL[p.kind]}</div>
+        <table>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${v}</td></tr>`).join("")}</table>`;
+      const panel = document.querySelector(".panel").getBoundingClientRect();
+      const r = row.getBoundingClientRect();
+      tip.hidden = false;
+      tip.style.left = `${panel.right + 8}px`;
+      tip.style.top = `${Math.min(r.top, window.innerHeight - tip.offsetHeight - 8)}px`;
+    }
+    function hideTip() { tip.hidden = true; }
 
     function selectRoute(rank, data) {
       document.querySelectorAll(".route").forEach((b) => b.setAttribute("aria-pressed", String(+b.dataset.rank === rank)));

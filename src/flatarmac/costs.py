@@ -129,9 +129,11 @@ class CostModel:
             "full-height_turnstile": 6.0,
         }
     )
-    # Turn penalty: free up to `free_turn_deg`, quadratic up to `u_turn_s` at 180°.
-    free_turn_deg: float = 45.0
-    u_turn_s: float = 5.0
+    # Turn penalty: free up to `free_turn_deg`, then grows to `u_turn_s` at 180°. Breaking rhythm
+    # is what makes short laps tiring: ~3 s for a 90° corner, 12 s for a turnaround.
+    free_turn_deg: float = 30.0
+    u_turn_s: float = 12.0
+    turn_exponent: float = 1.5
 
     def surface_key(self, belagsart: str, rclass: RoadClass) -> str:
         if belagsart == "Natur" and rclass == RoadClass.PATH:
@@ -140,7 +142,7 @@ class CostModel:
 
     def turn_s(self, deflection_deg: float) -> float:
         excess = max(deflection_deg - self.free_turn_deg, 0.0) / (180.0 - self.free_turn_deg)
-        return self.u_turn_s * excess**2
+        return self.u_turn_s * excess**self.turn_exponent
 
 
 @dataclass(frozen=True)

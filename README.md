@@ -6,9 +6,9 @@ See [PLAN.md](PLAN.md) for the approach and decisions.
 ## Pipeline
 
 ```bash
-uv run flatarmac fetch --region zurich   # swissTLM3D roads, swissALTI3D DEM, OSM stops (~0.9 GB download)
-uv run flatarmac build --region zurich   # network, gradient/surface/traffic/junction costs
-uv run flatarmac export --region zurich  # GeoJSON for the web map
+uv run flatarmac --region zurich fetch   # swissTLM3D roads, swissALTI3D DEM, OSM stops (~0.9 GB download)
+uv run flatarmac --region zurich build   # network, gradient/surface/traffic/junction costs
+uv run flatarmac --region zurich export  # GeoJSON for the web map
 ```
 
 Outputs land in `data/<region>/` (git-ignored): `edges.parquet`, `nodes.parquet`, `turns.parquet`.

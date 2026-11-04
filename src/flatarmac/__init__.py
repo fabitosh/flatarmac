@@ -76,7 +76,12 @@ def main() -> None:
     plan.add_argument("--start", type=_lat_lon, required=True, help="lat,lon")
     plan.add_argument("--end", type=_lat_lon, help="lat,lon (default: back to start)")
     plan.add_argument("--main", type=_main_block, default="8km", help='"8km", "8000m", "25min"')
-    plan.add_argument("--main-zone", default="threshold", help="pace zone for --main in minutes")
+    plan.add_argument(
+        "--main-zone",
+        default="threshold",
+        choices=["marathon", "threshold"],
+        help="pace zone for --main in minutes",
+    )
     plan.add_argument("--warmup", type=float, default=15, help="minutes")
     plan.add_argument("--cooldown", type=float, default=10, help="minutes")
     plan.add_argument("--mode", default="tarmac", choices=["tarmac", "firm_natural"])
