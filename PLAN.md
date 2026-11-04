@@ -47,8 +47,9 @@ Example: 15 min WU ≈ 3.0 km, 10 min CD ≈ 2.0 km, 25 min tempo ≈ 6.4 km.
 | Elevation        | swisstopo **swissALTI3D** (0.5 m / 2 m)  | Bare-earth DTM: wrong on bridges and in tunnels/underpasses → interpolate across `KUNSTBAUTE`. Compare against TLM Z values |
 | Traffic lights   | **OpenStreetMap** `highway=traffic_signals`, `crossing=traffic_signals` | **Not in swisstopo data.** Cantonal sets exist (Basel-Stadt, Luzern, …) but coverage is patchy |
 | Other stops      | OSM: crossings, stop/give-way, railway level crossings, barriers, steps | |
-| Traffic volume   | road class as proxy; maybe BAFU sonBASE road noise | Runner safety on roads without sidewalk |
-| Nice to have     | OSM `lit`, `amenity=drinking_water`, `sidewalk` | Night runs, fountains |
+| Traffic volume   | ARE road traffic loads (daily, peak hours); BAFU **sonBASE** road noise (day / night) | Matched onto TLM edges as parallel lines; quiet = off-peak, busy = evening peak. Width class is the fallback |
+| Sidewalks, crowds | OSM `sidewalk*`, `footway=sidewalk`, pedestrian streets and areas, shops and food, stations | Room to run beside traffic; crowded streets cost more when busy |
+| Nice to have     | OSM `lit`, `amenity=drinking_water` | Night runs, fountains |
 
 Graph base: TLM. OSM *point* features are snapped to TLM nodes/edges (cheap). OSM *edge* attribute
 conflation (surface, sidewalk, lit) is harder — defer.
