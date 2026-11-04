@@ -15,7 +15,7 @@ def pair_ends(turns: pd.DataFrame, max_deflection: float = MAX_DEFLECTION_DEG):
     moves = turns[
         (turns["in_edge"] < turns["out_edge"]) & (turns["deflection_deg"] <= max_deflection)
     ]
-    moves = moves.sort_values(["deflection_deg", "turn_s"], kind="stable")
+    moves = moves.sort_values(["deflection_deg", "turn_s_busy"], kind="stable")
     link: dict[tuple[int, int], tuple[int, int]] = {}
     for node, a, b in zip(moves["node_id"], moves["in_edge"], moves["out_edge"], strict=True):
         end_a, end_b = (a, node), (b, node)

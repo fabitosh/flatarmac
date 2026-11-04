@@ -6,7 +6,7 @@ See [PLAN.md](PLAN.md) for the approach and decisions.
 ## Pipeline
 
 ```bash
-uv run flatarmac --region zurich fetch   # swissTLM3D roads, swissALTI3D DEM, OSM stops (~0.9 GB download)
+uv run flatarmac --region zurich fetch   # roads, DEM, OSM, road noise, traffic loads (~0.9 GB download)
 uv run flatarmac --region zurich build   # network, gradient/surface/traffic/junction costs
 uv run flatarmac --region zurich export  # GeoJSON for the web map
 ```
@@ -19,7 +19,14 @@ Outputs land in `data/<region>/` (git-ignored): `edges.parquet`, `nodes.parquet`
 uv run flatarmac plan --start 47.3779,8.5403 --main 8km --warmup 15 --cooldown 10 --name hb
 uv run flatarmac plan --start 47.3913,8.4889 --main 25min --main-zone threshold --name altstetten
 uv run flatarmac plan --start 47.3667,8.5650 --mode firm_natural --name hottingen
+uv run flatarmac plan --start 47.3979,8.5300 --main 16km --time quiet --name sunday
 ```
+
+`--time` (and Quiet / Busy in the web form) sets how busy the streets are. Running beside traffic
+costs road noise (sonBASE, a mild nudge), no room to run (a busy road without a sidewalk) and
+crowds (pedestrian streets, shops and cafés, stations); crossings cost by the crossed road's
+traffic. Quiet is early morning, evening or Sunday: night noise, off-peak traffic, few people. Busy
+is weekday daytime or Saturday: day noise, the evening peak hour, full streets.
 
 Durations are converted with paces from `--five-k` (default 18:13). Warm-up/cool-down are routed with
 relaxed penalties; whatever the way to the block doesn't cover is run easy on the block itself.
@@ -58,6 +65,10 @@ Nothing downloaded is committed; `fetch` pulls it into `data/`.
 
 - Roads (swissTLM3D), elevation (swissALTI3D) and the base map: © [swisstopo](https://www.swisstopo.admin.ch/),
   open government data.
-- Stops, crossings and running tracks: © [OpenStreetMap](https://www.openstreetmap.org/copyright)
+- Road traffic noise (sonBASE): © [BAFU](https://www.bafu.admin.ch/), and road traffic loads
+  (national passenger transport model): © [ARE](https://www.are.admin.ch/), both open government
+  data via [geo.admin.ch](https://data.geo.admin.ch/).
+- Stops, crossings, sidewalks, pedestrian areas, shops, stations and running tracks:
+  © [OpenStreetMap](https://www.openstreetmap.org/copyright)
   contributors, ODbL. `curated/tracks_<region>.csv` is derived from OpenStreetMap and shared under
   the same licence.

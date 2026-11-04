@@ -39,6 +39,7 @@ def _plan(args, region) -> None:
         cooldown_min=args.cooldown,
         five_k=args.five_k,
         mode=args.mode,
+        time=args.time,
         top=args.top,
     )
     planner = Planner(region)
@@ -85,6 +86,12 @@ def main() -> None:
     plan.add_argument("--warmup", type=float, default=15, help="minutes")
     plan.add_argument("--cooldown", type=float, default=10, help="minutes")
     plan.add_argument("--mode", default="tarmac", choices=["tarmac", "firm_natural"])
+    plan.add_argument(
+        "--time",
+        default="busy",
+        choices=["quiet", "busy"],
+        help="quiet: early, evening or Sunday; busy: weekday daytime or Saturday",
+    )
     plan.add_argument("--five-k", default="18:13")
     plan.add_argument(
         "--top",
@@ -120,11 +127,13 @@ def main() -> None:
         uvicorn.run(create_app(region), host="127.0.0.1", port=args.port)
         return
     if args.command in ("fetch", "all"):
-        from flatarmac.sources import alti3d, osm, tlm
+        from flatarmac.sources import alti3d, noise, osm, tlm, traffic
 
         tlm.fetch(region)
         alti3d.fetch(region)
         osm.fetch(region)
+        noise.fetch(region)
+        traffic.fetch(region)
     if args.command in ("build", "all"):
         from flatarmac.build import build
 

@@ -14,6 +14,8 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
+from flatarmac.costs import TimeOfDay
+
 # While searching, each piece also costs this share of its easy-pace time, so 1 penalty second is
 # worth about 34 m of extra path (the warm-up router uses ~3.4 m). Low enough to follow a lake
 # promenade instead of the direct street, high enough to keep corridors from wandering.
@@ -89,7 +91,7 @@ class TurnGraph:
         a, b = moves["in_edge"].to_numpy(), moves["out_edge"].to_numpy()
         self.src = 2 * a + (v[a] != node)  # arriving along a: forward if a ends here
         self.dst = 2 * b + (u[b] != node)  # leaving along b: forward if b starts here
-        self.turn = moves["turn_s"].to_numpy()
+        self.turn = {time: moves[f"turn_s_{time}"].to_numpy() for time in TimeOfDay}
 
         order = np.argsort(self.start_node, kind="stable")
         bounds = np.searchsorted(self.start_node[order], np.arange(n_nodes + 1))
@@ -105,6 +107,7 @@ class TurnGraph:
         easy_pace_s_per_km: float,
         seed_nodes: np.ndarray,
         targets_m: list[float],
+        time: TimeOfDay = TimeOfDay.BUSY,
     ) -> list[Corridor]:
         """Per seed and target length, the path with the lowest penalty per km. Per target,
         duplicates (corridors mostly on the same edges) are removed; best first."""
@@ -112,7 +115,7 @@ class TurnGraph:
             return []
         piece_pen = np.repeat(edge_penalty, 2)
         step_per_m = LENGTH_WEIGHT * easy_pace_s_per_km / 1000
-        weight = piece_pen[self.dst] + step_per_m * self.length[self.dst] + self.turn
+        weight = piece_pen[self.dst] + step_per_m * self.length[self.dst] + self.turn[time]
         # csgraph treats explicit zeros as missing links.
         graph = csr_matrix((np.maximum(weight, 1e-6), (self.src, self.dst)), shape=(self.n, self.n))
         reach_m = SEARCH_REACH * max(targets_m)

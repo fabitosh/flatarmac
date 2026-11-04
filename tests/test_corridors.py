@@ -15,8 +15,8 @@ EDGES = pd.DataFrame(
 )
 TURNS = pd.DataFrame(
     [(1, 1, 2, 1.0), (1, 2, 1, 1.0), (2, 2, 3, 1.0), (2, 3, 2, 1.0)],
-    columns=["node_id", "in_edge", "out_edge", "turn_s"],
-)
+    columns=["node_id", "in_edge", "out_edge", "turn_s_busy"],
+).assign(turn_s_quiet=lambda t: t["turn_s_busy"])
 
 
 def test_corridor_takes_the_quiet_bent_path():
