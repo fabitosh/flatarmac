@@ -17,6 +17,19 @@ class SurfaceMode(StrEnum):
     FIRM_NATURAL = "firm_natural"  # gravel and forest roads, woodchip tracks
 
 
+class TimeOfDay(StrEnum):
+    QUIET = "quiet"  # early morning, evening, Sunday: night noise, off-peak traffic, few people
+    BUSY = "busy"  # weekday daytime, Saturday: day noise, peak-hour traffic, full streets
+
+
+class Sidewalk(StrEnum):
+    YES = "yes"  # tagged on the road in OSM, or mapped separately alongside
+    NO = "no"  # tagged as missing: you run on the carriageway
+    PEDESTRIAN = "pedestrian"  # pedestrian street or living street
+    UNKNOWN = "unknown"  # an OSM road without sidewalk tags
+    NOT_A_ROAD = "not_a_road"  # no OSM road or traffic link alongside: passage, square, path
+
+
 class RoadClass(StrEnum):
     PATH = "path"
     MINOR = "minor"
@@ -69,8 +82,71 @@ class GradientPenalty:
 
 
 @dataclass(frozen=True)
+class RoadsidePenalty:
+    """What running beside traffic costs, per time of day.
+
+    Noise is a mild nudge; what costs is having no room to run (no sidewalk on a busy road) and
+    crowds. Volumes are vehicles per hour, both directions; roads without a traffic-model link fall
+    back to the width class.
+    """
+
+    # Noise (sonBASE dB along the edge): free up to `quiet_db`, then linear, capped.
+    quiet_db: float = 55.0
+    s_per_km_per_db: float = 0.2  # 3 s/km at 70 dB
+    max_noise_s_per_km: float = 5.0
+    # No sidewalk: up to this much, reached at `full_vph`.
+    no_sidewalk_s_per_km: float = 15.0
+    full_vph: float = 600.0
+    # Sidewalk tags missing and no volume: this share of the width-class rate.
+    unknown_share: float = 0.5
+    # Crowds (index 0-1): pedestrian streets, station surroundings, shop and café density.
+    crowd_s_per_km: dict = field(
+        default_factory=lambda: {TimeOfDay.QUIET: 4.0, TimeOfDay.BUSY: 20.0}
+    )
+    # Crossing a road: by control, from free-flowing to `crossing_full_vph`.
+    crossing_range_s: dict = field(
+        default_factory=lambda: {
+            Control.SIGNAL: (8.0, 30.0),
+            Control.MARKED: (2.0, 8.0),
+            Control.UNMARKED: (1.0, 30.0),
+        }
+    )
+    crossing_full_vph: float = 1200.0
+    # Roads without a volume in Quiet: this share of the width-class crossing cost.
+    quiet_fallback_share: float = 0.5
+
+    def noise_s_per_km(self, db: np.ndarray) -> np.ndarray:
+        excess = np.nan_to_num(np.asarray(db, dtype=float) - self.quiet_db, nan=0.0)
+        return np.clip(excess * self.s_per_km_per_db, 0.0, self.max_noise_s_per_km)
+
+    def space_s_per_km(self, sidewalk, vph, class_s_per_km) -> np.ndarray:
+        sidewalk = np.asarray(sidewalk, dtype=object)
+        vph = np.asarray(vph, dtype=float)
+        class_s_per_km = np.asarray(class_s_per_km, dtype=float)
+        busy_share = np.clip(np.nan_to_num(vph, nan=0.0) / self.full_vph, 0.0, 1.0)
+        no_room = np.where(np.isnan(vph), class_s_per_km, self.no_sidewalk_s_per_km * busy_share)
+        unknown = np.where(
+            np.isnan(vph), self.unknown_share * class_s_per_km, self.unknown_share * no_room
+        )
+        return np.select(
+            [sidewalk == Sidewalk.NO, sidewalk == Sidewalk.UNKNOWN], [no_room, unknown], 0.0
+        )
+
+    def crowd_s_per_km_at(self, crowd: np.ndarray, time: TimeOfDay) -> np.ndarray:
+        return self.crowd_s_per_km[time] * np.clip(np.asarray(crowd, dtype=float), 0.0, 1.0)
+
+    def crossing_s(self, control: Control, vph: float, class_s: float, time: TimeOfDay) -> float:
+        """Crossing one road; `class_s` is the width-class cost used when the volume is unknown."""
+        if np.isnan(vph):
+            return class_s * (self.quiet_fallback_share if time == TimeOfDay.QUIET else 1.0)
+        low, high = self.crossing_range_s[control]
+        return low + (high - low) * min(vph / self.crossing_full_vph, 1.0)
+
+
+@dataclass(frozen=True)
 class CostModel:
     gradient: GradientPenalty = field(default_factory=GradientPenalty)
+    roadside: RoadsidePenalty = field(default_factory=RoadsidePenalty)
 
     # s/km by surface mode and (belagsart, path?) — path matters for natural surfaces only.
     surface_s_per_km: dict = field(
@@ -79,7 +155,7 @@ class CostModel:
             SurfaceMode.FIRM_NATURAL: {"Hart": 10.0, "k_W": 10.0, "Natur": 0.0, "Natur_path": 15.0},
         }
     )
-    # Running next to traffic: noise, busy sidewalks.
+    # Width-class fallback for roads without traffic or sidewalk data (see RoadsidePenalty).
     traffic_s_per_km: dict = field(
         default_factory=lambda: {
             RoadClass.PATH: 0.0,
@@ -90,7 +166,8 @@ class CostModel:
     )
     stairs_s: float = 300.0
 
-    # Crossing one road at a junction, by how it is controlled.
+    # Crossing one road at a junction, by how it is controlled: width-class fallback for roads
+    # without a traffic volume (see RoadsidePenalty.crossing_s).
     crossing_s: dict = field(
         default_factory=lambda: {
             Control.SIGNAL: {
@@ -134,6 +211,8 @@ class CostModel:
     free_turn_deg: float = 30.0
     u_turn_s: float = 12.0
     turn_exponent: float = 1.5
+    # Repeating the same stretch gets monotonous: every lap costs this much on top of its corners.
+    lap_s: float = 6.0
 
     def surface_key(self, belagsart: str, rclass: RoadClass) -> str:
         if belagsart == "Natur" and rclass == RoadClass.PATH:
@@ -160,12 +239,18 @@ MAIN = PhaseWeights()
 TRANSIT = PhaseWeights(gradient=0.03, stops=0.35, surface=0.5, traffic=0.5, obstacles=0.3)
 
 
-def edge_penalty_s(edges, mode: SurfaceMode, weights: PhaseWeights, include_stops: bool = True):
+def edge_penalty_s(
+    edges,
+    mode: SurfaceMode,
+    weights: PhaseWeights,
+    time: TimeOfDay = TimeOfDay.BUSY,
+    include_stops: bool = True,
+):
     """Weighted penalty seconds per edge (excluding junction / turn costs)."""
     total = (
         weights.gradient * edges["gradient_s"]
         + weights.surface * edges[f"surface_s_{mode}"]
-        + weights.traffic * edges["traffic_s"]
+        + weights.traffic * edges[f"traffic_s_{time}"]
         + weights.obstacles * edges["obstacle_s"]
     )
     if include_stops:

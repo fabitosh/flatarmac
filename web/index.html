@@ -135,6 +135,13 @@
           <button data-mode="tarmac" aria-pressed="true" type="button">Tarmac</button>
           <button data-mode="firm_natural" aria-pressed="false" type="button">Firm natural</button>
         </div></div>
+      <div class="field"><label>Streets</label>
+        <div class="seg" role="group" aria-label="Time of day">
+          <button data-time="quiet" aria-pressed="false" type="button"
+            title="Early morning, evening or Sunday: little traffic, few people">Quiet</button>
+          <button data-time="busy" aria-pressed="true" type="button"
+            title="Weekday daytime or Saturday: peak traffic, full streets">Busy</button>
+        </div></div>
       <button class="primary" id="go" type="button" disabled>Find routes</button>
       <div id="status" role="status"></div>
     </section>
@@ -197,20 +204,28 @@
     });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
 
-    // --- surface mode ---
+    // --- surface mode and time of day ---
     let mode = "tarmac";
-    const setMode = (next) => {
+    let time = "busy";
+    const setMode = (next = mode, nextTime = time) => {
       mode = next;
+      time = nextTime;
       document.querySelectorAll("[data-mode]").forEach((b) =>
         b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+      document.querySelectorAll("[data-time]").forEach((b) =>
+        b.setAttribute("aria-pressed", String(b.dataset.time === time)));
       if (!map.getLayer("edges")) return;
-      const prop = `score_${mode}`;
+      map.setPaintProperty("junctions", "circle-radius",
+        ["interpolate", ["linear"], ["get", `through_s_${time}`], 0, 3, 30, 9]);
+      const prop = `score_${mode}_${time}`;
       map.setPaintProperty("edges", "line-color", step(prop, "color"));
       map.setPaintProperty("edges", "line-width", step(prop, "width"));
       map.setLayoutProperty("edges", "line-sort-key", ["get", prop]);
     };
     document.querySelectorAll("[data-mode]").forEach((b) =>
       b.addEventListener("click", () => setMode(b.dataset.mode)));
+    document.querySelectorAll("[data-time]").forEach((b) =>
+      b.addEventListener("click", () => setMode(mode, b.dataset.time)));
 
     // --- start / finish points ---
     let start = null, end = null, picking = "start";
@@ -313,6 +328,7 @@
         cooldown_min: +document.getElementById("cooldown").value,
         five_k: document.getElementById("five-k").value,
         mode,
+        time,
       };
       try {
         const res = await fetch("/api/plan", {
@@ -454,7 +470,7 @@
         id: "junctions", type: "circle", source: "junctions", minzoom: 13,
         paint: {
           "circle-color": "#eb6834",
-          "circle-radius": ["interpolate", ["linear"], ["get", "through_s"], 0, 3, 30, 9],
+          "circle-radius": ["interpolate", ["linear"], ["get", "through_s_busy"], 0, 3, 30, 9],
           "circle-stroke-color": "#fcfcfb",
           "circle-stroke-width": 2,
         },
@@ -496,22 +512,31 @@
     });
 
     // --- hover details ---
+    const SIDEWALK = {
+      yes: "yes", no: "none", pedestrian: "pedestrian street", unknown: "not mapped", not_a_road: "–",
+    };
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "280px" });
     map.on("mousemove", "edges", (e) => {
       if (map.queryRenderedFeatures(e.point, { layers: TRACK_LAYERS }).length) return;
       map.getCanvas().style.cursor = "crosshair";
       const p = e.features[0].properties;
+      const num = (v) => (v == null || v === "null" ? null : v);
       const rows = [
-        ["Score", `${p[`score_${mode}`]} / 100`],
+        ["Score", `${p[`score_${mode}_${time}`]} / 100`],
         ["Length", `${fmt(p.length_m)} m`],
         ["Ascent", `${fmt(p.ascent_m)} m`],
         ["Max grade", `${fmt(p.max_grade_pct)} %`],
-        ["Penalty, seconds", ""],
-        ["Gradient", `${fmt(p.gradient_s)} s`],
-        ["Surface", `${fmt(p[`surface_s_${mode}`])} s`],
-        ["Traffic", `${fmt(p.traffic_s)} s`],
+        ["Penalty", ""],
+        ["Gradient", `${fmt(p.gradient_s_per_km)} s/km`],
+        ["Surface", `${fmt(p[`surface_s_per_km_${mode}`])} s/km`],
+        ["Traffic", `${fmt(p[`traffic_s_per_km_${time}`])} s/km`],
         ["Stairs", `${fmt(p.obstacle_s)} s`],
         ["Stops", `${fmt(p.stops_s)} s`],
+        [`Beside the way (${time})`, ""],
+        ["Noise", num(p[`noise_db_${time}`]) == null ? "–" : `${Math.round(p[`noise_db_${time}`])} dB`],
+        ["Vehicles", num(p[`vph_${time}`]) == null ? "–" : `${Math.round(p[`vph_${time}`])} /h`],
+        ["Sidewalk", SIDEWALK[p.sidewalk] ?? p.sidewalk],
+        ["Crowd", `${Math.round(100 * p.crowd)} %`],
       ];
       popup.setLngLat(e.lngLat).setHTML(
         `<strong>${p.name && p.name !== "null" ? p.name : p.objektart}</strong>
@@ -523,7 +548,7 @@
       const p = e.features[0].properties;
       popup.setLngLat(e.lngLat).setHTML(
         `<strong>Junction</strong><div class="muted">${p.control === "null" ? "no OSM control" : p.control} · degree ${p.degree}</div>
-         <table><tr><td>Through delay</td><td class="num">${fmt(p.through_s)} s</td></tr></table>`
+         <table><tr><td>Through delay (${time})</td><td class="num">${fmt(p[`through_s_${time}`])} s</td></tr></table>`
       ).addTo(map);
     });
     map.on("mousemove", TRACK_LAYERS, (e) => {

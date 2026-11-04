@@ -20,25 +20,44 @@ class Profile:
     grade: np.ndarray  # smoothed grade per sample interval (len = samples - 1)
 
 
-def profile(line: shapely.LineString) -> Profile:
-    coords = shapely.get_coordinates(line, include_z=True)
+def _along(coords: np.ndarray) -> np.ndarray:
     steps = np.hypot(np.diff(coords[:, 0]), np.diff(coords[:, 1]))
-    along = np.concatenate([[0.0], np.cumsum(steps)])
-    length = along[-1]
+    return np.concatenate([[0.0], np.cumsum(steps)])
 
-    n_samples = max(int(np.ceil(length / SAMPLE_SPACING_M)), 1) + 1
-    distance = np.linspace(0.0, length, n_samples)
-    z = np.interp(distance, along, coords[:, 2])
-    if length == 0:
-        return Profile(distance, z, np.zeros(0))
 
-    # Grade over a centred window, clamped to the edge. Short edges get their end-to-end grade.
-    mid = (distance[:-1] + distance[1:]) / 2
-    half = min(GRADE_WINDOW_M, length) / 2
-    lo = np.clip(mid - half, 0.0, length - 2 * half)
-    hi = lo + 2 * half
-    grade = (np.interp(hi, along, coords[:, 2]) - np.interp(lo, along, coords[:, 2])) / (2 * half)
-    return Profile(distance, z, grade)
+def profile(line: shapely.LineString) -> Profile:
+    return chain_profiles([line])[0]
+
+
+def chain_profiles(lines: list[shapely.LineString]) -> list[Profile]:
+    """Profiles of consecutive lines (each oriented along the chain), graded across their joins.
+
+    The grade window runs over the whole chain, clamped to its ends, so a short edge inside a stroke
+    is graded with its neighbours instead of end to end.
+    """
+    pieces = [shapely.get_coordinates(line, include_z=True) for line in lines]
+    starts = np.concatenate([[0.0], np.cumsum([_along(c)[-1] for c in pieces])])
+    chain = np.vstack(pieces)
+    chain_along = np.concatenate([_along(c) + s for c, s in zip(pieces, starts, strict=False)])
+    total = starts[-1]
+    half = min(GRADE_WINDOW_M, total) / 2
+
+    profiles = []
+    for coords, start in zip(pieces, starts, strict=False):
+        length = _along(coords)[-1]
+        n_samples = max(int(np.ceil(length / SAMPLE_SPACING_M)), 1) + 1
+        distance = np.linspace(0.0, length, n_samples)
+        z = np.interp(distance, _along(coords), coords[:, 2])
+        if length == 0:
+            profiles.append(Profile(distance, z, np.zeros(0)))
+            continue
+        # Grade over a centred window, clamped to the chain.
+        mid = start + (distance[:-1] + distance[1:]) / 2
+        lo = np.clip(mid - half, 0.0, total - 2 * half)
+        hi = lo + 2 * half
+        rise = np.interp(hi, chain_along, chain[:, 2]) - np.interp(lo, chain_along, chain[:, 2])
+        profiles.append(Profile(distance, z, rise / (2 * half)))
+    return profiles
 
 
 def drape(line: shapely.LineString, dem) -> shapely.LineString:

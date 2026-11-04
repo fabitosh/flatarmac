@@ -6,7 +6,7 @@ import pandas as pd
 import rasterio
 
 from flatarmac import elevation
-from flatarmac.costs import MAIN, CostModel, SurfaceMode, edge_penalty_s
+from flatarmac.costs import MAIN, CostModel, SurfaceMode, TimeOfDay, edge_penalty_s
 
 TRACK_ACCESS_M = 100.0
 
@@ -30,27 +30,25 @@ TRACK_SURFACE = {
 
 
 def stroke_costs(strokes: pd.DataFrame, edges: pd.DataFrame, turns: pd.DataFrame) -> pd.DataFrame:
-    """Per stroke position: edge length, main-block penalty per mode, turn cost into the next edge."""
+    """Per stroke position: edge length, main-block penalty per mode and time, turn cost into the
+    next edge per time."""
     per_edge = edges[["edge_id", "length_m"]].copy()
     for mode in SurfaceMode:
-        per_edge[f"cost_{mode}"] = edge_penalty_s(edges, mode, MAIN)
+        for time in TimeOfDay:
+            per_edge[f"cost_{mode}_{time}"] = edge_penalty_s(edges, mode, MAIN, time)
     out = strokes.sort_values(["stroke_id", "seq"]).merge(per_edge, on="edge_id", how="left")
 
     next_edge = out.groupby("stroke_id")["edge_id"].shift(-1)
     first_edge = out.groupby("stroke_id")["edge_id"].transform("first")
     next_edge = next_edge.fillna(first_edge.where(out["closed"]))
-    lookup = dict(
-        zip(
-            zip(turns["node_id"], turns["in_edge"], turns["out_edge"], strict=True),
-            turns["turn_s"],
-            strict=True,
-        )
-    )
-    # NaN marks the end of an open stroke; turns missing from the table (self-loops) are free.
-    out["turn_next_s"] = [
-        np.nan if pd.isna(nxt) else lookup.get((node, edge, int(nxt)), 0.0)
-        for node, edge, nxt in zip(out["to_node"], out["edge_id"], next_edge, strict=True)
-    ]
+    keys = list(zip(turns["node_id"], turns["in_edge"], turns["out_edge"], strict=True))
+    for time in TimeOfDay:
+        lookup = dict(zip(keys, turns[f"turn_s_{time}"], strict=True))
+        # NaN marks the end of an open stroke; turns missing from the table (self-loops) are free.
+        out[f"turn_next_s_{time}"] = [
+            np.nan if pd.isna(nxt) else lookup.get((node, edge, int(nxt)), 0.0)
+            for node, edge, nxt in zip(out["to_node"], out["edge_id"], next_edge, strict=True)
+        ]
     return out
 
 

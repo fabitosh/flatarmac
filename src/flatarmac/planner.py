@@ -18,8 +18,9 @@ from pyproj import Transformer
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
+from flatarmac import corridors
 from flatarmac.config import LV95, WGS84, Region
-from flatarmac.costs import MAIN, TRANSIT, CostModel, SurfaceMode, edge_penalty_s
+from flatarmac.costs import MAIN, TRANSIT, CostModel, SurfaceMode, TimeOfDay, edge_penalty_s
 from flatarmac.pace import Runner, Zone, flat_equivalent_m
 
 MIN_STRETCH_M = 150.0
@@ -47,6 +48,7 @@ class Request:
     cooldown_m: float
     easy_pace_s_per_km: float
     mode: SurfaceMode = SurfaceMode.TARMAC
+    time: TimeOfDay = TimeOfDay.BUSY
     end: tuple[float, float] | None = None
     top: int = 10
 
@@ -64,6 +66,7 @@ def make_request(
     five_k: str,
     main_zone: str = "threshold",
     mode: str = "tarmac",
+    time: str = "busy",
     end: tuple[float, float] | None = None,
     top: int = 10,
 ) -> Request:
@@ -81,6 +84,7 @@ def make_request(
         cooldown_m=runner.distance_m(cooldown_min * 60, Zone.EASY),
         easy_pace_s_per_km=runner.pace_s_per_km(Zone.EASY),
         mode=SurfaceMode(mode),
+        time=TimeOfDay(time),
         top=top,
     )
 
@@ -149,7 +153,7 @@ class Suggestion:
     name: str
     lap_m: float
     laps: float
-    main_s: float  # main-block penalty: laps + parts run on the way
+    main_s: float  # main-block penalty: laps (incl. the per-lap cost) + parts run on the way
     warmup_s: float  # incl. the part of the warm-up run on the block
     cooldown_s: float
     warmup_m: float  # distance from start to the block
@@ -180,13 +184,11 @@ class Planner:
         strokes = pd.read_parquet(region.dir / "strokes.parquet")
         self.strokes = {sid: group for sid, group in strokes.groupby("stroke_id", sort=False)}
         turns = pd.read_parquet(region.dir / "turns.parquet")
-        self.turn_s = dict(
-            zip(
-                zip(turns["node_id"], turns["in_edge"], turns["out_edge"], strict=True),
-                turns["turn_s"],
-                strict=True,
-            )
-        )
+        keys = list(zip(turns["node_id"], turns["in_edge"], turns["out_edge"], strict=True))
+        self.turn_s = {
+            time: dict(zip(keys, turns[f"turn_s_{time}"], strict=True)) for time in TimeOfDay
+        }
+        self.turn_graph = corridors.TurnGraph(self.edges, turns, len(self.nodes))
         self.node_xy = shapely.get_coordinates(self.nodes.geometry.values)
         self.node_tree = shapely.STRtree(self.nodes.geometry.values)
         named = self.edges[self.edges["name"].notna()]
@@ -220,13 +222,16 @@ class Planner:
         pair_edge = dict(zip(zip(both["a"], both["b"], strict=True), both["edge"], strict=True))
         return graph, pair_edge
 
-    def _penalties(self, mode: SurfaceMode, weights) -> np.ndarray:
+    def _penalties(self, req: Request, weights) -> np.ndarray:
         """Per-edge penalty incl. half the junction cost at each end."""
-        through = self.nodes["through_s"].to_numpy()
+        through = self.nodes[f"through_s_{req.time}"].to_numpy()
         e = self.edges
-        return edge_penalty_s(e, mode, weights).to_numpy() + 0.5 * weights.stops * (
+        return self._edge_s(req, weights) + 0.5 * weights.stops * (
             through[e["u"]] + through[e["v"]]
         )
+
+    def _edge_s(self, req: Request, weights) -> np.ndarray:
+        return edge_penalty_s(self.edges, req.mode, weights, req.time).to_numpy()
 
     def _tree(self, graph, pair_edge, source: int, limit_s: float):
         """Dijkstra tree: predecessors, distance along tree paths, nodes in settle order."""
@@ -274,7 +279,7 @@ class Planner:
     def _stroke_blocks(self, req: Request, transit_s: np.ndarray) -> list[Block]:
         """Out-and-backs: per stroke and lap band, the best section (incl. how to get there).
         Closed strokes become loops."""
-        cost_col = f"cost_{req.mode}"
+        cost_col = f"cost_{req.mode}_{req.time}"
         u_turn = self.model.turn_s(180.0)
         blocks = []
         for group in self.strokes.values():
@@ -284,7 +289,7 @@ class Planner:
                 continue
             length = group["length_m"].to_numpy()
             cost = group[cost_col].to_numpy()
-            turn = group["turn_next_s"].to_numpy()
+            turn = group[f"turn_next_s_{req.time}"].to_numpy()
             edges = list(zip(group["edge_id"], group["forward"], strict=True))
 
             if group["closed"].iloc[0]:
@@ -312,7 +317,7 @@ class Planner:
                 lap_s = 2 * (cum_cost[j] - cum_cost[i]) + lap_turn
                 # Best access anywhere on the section: running min of transit over nodes i..j.
                 access = np.minimum.accumulate(transit[i:])[1:]
-                score = lap_s * req.main_m / lap_m + access
+                score = (lap_s + self.model.lap_s) * req.main_m / lap_m + access
                 ok = (stretch >= MIN_STRETCH_M) & (stretch <= req.main_m / 2 * 1.05)
                 band_of = np.digitize(lap_m, LAP_BANDS)
                 for band in np.unique(band_of[ok]):
@@ -324,6 +329,32 @@ class Planner:
                     Block("out_and_back", lap_m, lap_s, lap_turn, nodes[i : j + 1], edges[i:j])
                 )
         return blocks
+
+    def _corridor_blocks(self, req: Request, wu: Transit) -> list[Block]:
+        """Out-and-backs along the most runnable path of half (or a quarter of) the main block,
+        starting around where the warm-up ends. See `corridors`."""
+        targets = [t for t in (req.main_m / 2, req.main_m / 4) if t >= corridors.MIN_ONE_WAY_M]
+        e = self.edges
+        main_cost = self._edge_s(req, MAIN)
+        per_km = main_cost / np.maximum(e["length_m"].to_numpy(), 1.0) * 1000
+        node_s_per_km = np.full(len(self.nodes), np.inf)
+        np.minimum.at(node_s_per_km, e["u"].to_numpy(), per_km)
+        np.minimum.at(node_s_per_km, e["v"].to_numpy(), per_km)
+        seeds = corridors.seeds(self.node_xy, wu.flat_m, req.warmup_m, node_s_per_km)
+        u_turn = self.model.turn_s(180.0)
+        return [
+            Block(
+                "out_and_back",
+                2 * c.length_m,
+                2 * c.penalty_s + 2 * u_turn,
+                2 * c.turn_s + 2 * u_turn,
+                c.nodes,
+                c.edges,
+            )
+            for c in self.turn_graph.corridors(
+                main_cost, req.easy_pace_s_per_km, seeds, targets, req.time
+            )
+        ]
 
     def _track_blocks(self, req: Request) -> list[Block]:
         return [
@@ -343,12 +374,13 @@ class Planner:
     def _cycle_blocks(self, req: Request, source: int, limit_s: float) -> list[Block]:
         """Loops from a shortest-path tree on main-block costs: every non-tree edge closes a cycle
         made of two good branches. One Dijkstra gives thousands of loops of all sizes."""
-        penalty = self._penalties(req.mode, MAIN)
+        penalty = self._penalties(req, MAIN)
         graph, pair_edge = self._graph(penalty, req.easy_pace_s_per_km)
         pred, dist, order = self._tree(graph, pair_edge, source, limit_s)
         e = self.edges
         length = e["length_m"].to_numpy()
-        main_cost = edge_penalty_s(e, req.mode, MAIN).to_numpy()
+        main_cost = self._edge_s(req, MAIN)
+        turns = self.turn_s[req.time]
         u_arr, v_arr = e["u"].to_numpy(), e["v"].to_numpy()
         max_lap = min(MAX_LOOP_M, req.main_m)
 
@@ -380,7 +412,7 @@ class Planner:
             nodes = ring[:-1]
             incoming = ring_edges[-1:] + ring_edges[:-1]
             turn_s = sum(
-                self.turn_s.get(key, 0.0) for key in zip(nodes, incoming, ring_edges, strict=True)
+                turns.get(key, 0.0) for key in zip(nodes, incoming, ring_edges, strict=True)
             )
             lap_s = main_cost[ring_edges].sum() + turn_s
             forward = [u_arr[x] == a for a, x in zip(nodes, ring_edges, strict=True)]
@@ -419,7 +451,8 @@ class Planner:
         wu_s = wu.leg_s(nodes, req.warmup_m) + easy_per_m * wu.unused_m(nodes, wu_budget)
         cd_s = cd.leg_s(nodes, req.cooldown_m) + easy_per_m * cd.unused_m(nodes, cd_budget)
         # Track connectors (<= 100 m) are ignored in the penalty split.
-        score = np.where(feasible, block.lap_s * laps_m / block.lap_m + wu_s + cd_s, np.inf)
+        per_lap_s = block.lap_s + self.model.lap_s
+        score = np.where(feasible, per_lap_s * laps_m / block.lap_m + wu_s + cd_s, np.inf)
         if not np.isfinite(score).any():
             return None
         best = int(np.argmin(score))
@@ -429,7 +462,7 @@ class Planner:
             name=block.name or "",
             lap_m=float(block.lap_m),
             laps=float(laps_m[best] / block.lap_m),
-            main_s=float(block.lap_s * laps_m[best] / block.lap_m),
+            main_s=float(per_lap_s * laps_m[best] / block.lap_m),
             warmup_s=float(wu_s[best]),
             cooldown_s=float(cd_s[best]),
             warmup_m=float(wu.dist_m[node] + block.access_m),
@@ -495,8 +528,8 @@ class Planner:
     # --- entry point -----------------------------------------------------------------------------
 
     def plan(self, req: Request) -> list[Suggestion]:
-        relaxed = self._penalties(req.mode, TRANSIT)
-        strict = self._penalties(req.mode, MAIN)
+        relaxed = self._penalties(req, TRANSIT)
+        strict = self._penalties(req, MAIN)
         graph, pair_edge = self._graph(relaxed, req.easy_pace_s_per_km)
         self.edge_by_pair = pair_edge
         reach_m = REACH_FACTOR * max(req.warmup_m, req.cooldown_m) + req.main_m * MAX_ON_THE_WAY
@@ -515,9 +548,10 @@ class Planner:
         blocks = (
             self._stroke_blocks(req, transit_s)
             + self._cycle_blocks(req, start, limit_s)
+            + self._corridor_blocks(req, wu)
             + self._track_blocks(req)
         )
-        easy_edge = edge_penalty_s(self.edges, req.mode, TRANSIT).to_numpy()
+        easy_edge = self._edge_s(req, TRANSIT)
         for block in blocks:
             block.easy_s = self._easy_lap_s(block, easy_edge)
         scored = [(s, b) for b in blocks if (s := self._evaluate(b, req, wu, cd)) is not None]

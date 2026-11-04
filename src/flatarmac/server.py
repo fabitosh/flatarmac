@@ -29,6 +29,7 @@ class PlanInput(BaseModel):
     warmup_min: float = Field(15, ge=0)
     cooldown_min: float = Field(10, ge=0)
     mode: Literal["tarmac", "firm_natural"] = "tarmac"
+    time: Literal["quiet", "busy"] = "busy"
     five_k: str = Field("18:13", pattern=FIVE_K)
     top: int = Field(10, ge=1, le=25)
 

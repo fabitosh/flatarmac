@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import shapely
 
-from flatarmac.costs import Control, CostModel, RoadClass
+from flatarmac.costs import Control, CostModel, TimeOfDay
 
 SIGNAL_RADIUS_M = 25.0
 CROSSING_RADIUS_M = 15.0
@@ -65,41 +65,63 @@ def _bearing(line: shapely.LineString, at_start: bool) -> float:
     return math.degrees(math.atan2(target.y - origin.y, target.x - origin.x)) % 360
 
 
+def crossing_costs(edges: gpd.GeoDataFrame, model: CostModel) -> dict:
+    """Seconds to cross each edge's road at a junction, per (control, time): by its traffic volume,
+    else by its width class."""
+    out = {}
+    for control in Control:
+        class_s = edges["road_class"].map(model.crossing_s[control]).to_numpy()
+        for time in TimeOfDay:
+            vph = edges[f"vph_{time}"].to_numpy()
+            out[control, time] = np.array(
+                [
+                    model.roadside.crossing_s(control, v, c, time)
+                    for v, c in zip(vph, class_s, strict=True)
+                ]
+            )
+    return out
+
+
 def turn_table(edges: gpd.GeoDataFrame, controls: pd.Series, model: CostModel) -> pd.DataFrame:
-    """Cost of passing node n from in_edge to out_edge, in seconds.
+    """Cost of passing node n from in_edge to out_edge, in seconds, per time of day.
 
     Other edges at the junction split into the two sides of the path; the runner is assumed to be
     on the cheaper side and to cross every road on it. U-turns are included (in_edge == out_edge).
     """
-    incident: dict[int, list[tuple[int, float, RoadClass]]] = defaultdict(list)
+    crossing = crossing_costs(edges, model)
+    position = pd.Series(np.arange(len(edges)), index=edges["edge_id"])
+    incident: dict[int, list[tuple[int, float, int]]] = defaultdict(list)
     for edge in edges.itertuples():
         if edge.u == edge.v:
             continue  # self-loops: rare and bearing is ambiguous
         line = edge.geometry
-        incident[edge.u].append((edge.edge_id, _bearing(line, True), edge.road_class))
-        incident[edge.v].append((edge.edge_id, _bearing(line, False), edge.road_class))
+        row = position[edge.edge_id]
+        incident[edge.u].append((edge.edge_id, _bearing(line, True), row))
+        incident[edge.v].append((edge.edge_id, _bearing(line, False), row))
 
+    times = list(TimeOfDay)
     rows = []
     for node, spokes in incident.items():
         control = controls.iloc[node] if pd.notna(controls.iloc[node]) else Control.UNMARKED
-        crossing = model.crossing_s[control]
+        cost = [crossing[control, time] for time in times]
         for in_id, in_bearing, _ in spokes:
             for out_id, out_bearing, _ in spokes:
                 ccw = (out_bearing - in_bearing) % 360
                 deflection = 180 - ccw if ccw <= 180 else ccw - 180
+                side_s = [0.0] * len(times)
                 if in_id == out_id:
-                    deflection, side_s = 180.0, 0.0
+                    deflection = 180.0
                 else:
-                    left = right = 0.0
-                    for other_id, b, rclass in spokes:
+                    left = [0.0] * len(times)
+                    right = [0.0] * len(times)
+                    for other_id, b, row in spokes:
                         if other_id in (in_id, out_id):
                             continue
-                        if 0 < (b - in_bearing) % 360 < ccw:
-                            left += crossing[rclass]
-                        else:
-                            right += crossing[rclass]
-                    side_s = min(left, right)
-                rows.append((node, in_id, out_id, deflection, side_s + model.turn_s(deflection)))
-    return pd.DataFrame(
-        rows, columns=["node_id", "in_edge", "out_edge", "deflection_deg", "turn_s"]
-    )
+                        side = left if 0 < (b - in_bearing) % 360 < ccw else right
+                        for i, c in enumerate(cost):
+                            side[i] += c[row]
+                    side_s = [min(lf, rt) for lf, rt in zip(left, right, strict=True)]
+                angle_s = model.turn_s(deflection)
+                rows.append((node, in_id, out_id, deflection, *(s + angle_s for s in side_s)))
+    columns = ["node_id", "in_edge", "out_edge", "deflection_deg"]
+    return pd.DataFrame(rows, columns=columns + [f"turn_s_{time}" for time in times])

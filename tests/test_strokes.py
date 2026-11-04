@@ -9,7 +9,9 @@ def _turns(rows):
     for node, a, b, deflection in rows:
         out.append((node, a, b, deflection, 0.0))
         out.append((node, b, a, deflection, 0.0))
-    return pd.DataFrame(out, columns=["node_id", "in_edge", "out_edge", "deflection_deg", "turn_s"])
+    return pd.DataFrame(
+        out, columns=["node_id", "in_edge", "out_edge", "deflection_deg", "turn_s_busy"]
+    )
 
 
 def test_straight_chain_through_t_junction():
