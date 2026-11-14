@@ -17,8 +17,10 @@ COLUMNS = {"DTV_FZG": "daily", "MSP_FZG": "morning_peak", "ASP_FZG": "evening_pe
 
 
 def fetch(region: Region) -> gpd.GeoDataFrame:
-    # Ranged reads of the national file; without this GDAL also probes for side-car files.
-    pyogrio.set_gdal_config_options({"GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR"})
+    # Ranged reads of the national file; without these GDAL also probes for side-car files.
+    pyogrio.set_gdal_config_options(
+        {"GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR", "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".gpkg"}
+    )
     links = pyogrio.read_dataframe(
         "/vsicurl/" + URL, bbox=region.bbox_lv95, columns=list(COLUMNS)
     ).rename(columns=COLUMNS)

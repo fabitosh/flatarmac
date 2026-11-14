@@ -1,8 +1,9 @@
 """Curated list of running tracks per region, with the lap length a runner actually runs.
 
-The CSV in `curated/tracks_<region>.csv` is the source of truth and meant to be edited by hand
-(`lap_m`, `include`, `name`, `note`). `refresh` adds newly discovered OSM tracks without touching
-existing rows. Ring geometry is fetched per id from the main OSM API (no Overpass needed).
+The CSV `tracks_<region>.csv` (see `config.CURATED_DIR`) is the source of truth and meant to be
+edited by hand (`lap_m`, `include`, `name`, `note`). `refresh` adds newly discovered OSM tracks
+without touching existing rows. Ring geometry is fetched per id from the main OSM API (no Overpass
+needed).
 """
 
 import math
@@ -14,10 +15,9 @@ import httpx
 import pandas as pd
 import shapely
 
-from flatarmac.config import LV95, WGS84, Region
+from flatarmac.config import CURATED_DIR, LV95, WGS84, Region, curated_path
 from flatarmac.sources.osm import USER_AGENT, _lap_ring, _overpass
 
-CURATED_DIR = Path(__file__).resolve().parents[2] / "curated"
 OSM_API = "https://api.openstreetmap.org/api/0.6"
 COLUMNS = ["osm_type", "osm_id", "name", "lap_m", "surface", "include", "note"]
 SPORTS = {"running", "athletics"}
@@ -99,6 +99,7 @@ def sites(points: list[shapely.Point]) -> list[tuple[str, str]]:
 
 
 def csv_path(region: Region) -> Path:
+    """Where `refresh` writes the list."""
     return CURATED_DIR / f"tracks_{region.name}.csv"
 
 
@@ -107,7 +108,7 @@ def ring_cache(region: Region) -> Path:
 
 
 def load(region: Region) -> pd.DataFrame:
-    path = csv_path(region)
+    path = curated_path("tracks", region)
     if not path.exists():
         return pd.DataFrame(columns=COLUMNS)
     return pd.read_csv(path, dtype={"osm_type": str, "osm_id": int, "include": bool})
@@ -171,12 +172,12 @@ def refresh(region: Region, extra_ids: list[tuple[str, int]] = ()) -> pd.DataFra
     rings = gpd.read_parquet(cache_path) if cache_path.exists() else None
     cached = set() if rings is None else set(zip(rings["osm_type"], rings["osm_id"], strict=True))
 
-    edges = gpd.read_parquet(region.dir / "edges.parquet", columns=["name", "geometry"])
-    named = edges[edges["name"].notna()].reset_index(drop=True)
+    roads = gpd.read_parquet(region.dir / "tlm_roads.parquet", columns=["strname", "geometry"])
+    named = roads[roads["strname"].notna()].reset_index(drop=True)
     named_tree = shapely.STRtree(named.geometry.values)
 
     def nearby_street(ring_lv95) -> str:
-        return named["name"].iloc[named_tree.nearest(ring_lv95.centroid)]
+        return named["strname"].iloc[named_tree.nearest(ring_lv95.centroid)]
 
     new_rows, new_rings, centroids = [], [], []
     with httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=60) as client:
@@ -237,7 +238,7 @@ def refresh(region: Region, extra_ids: list[tuple[str, int]] = ()) -> pd.DataFra
 
     curated = pd.concat([curated, pd.DataFrame(new_rows, columns=COLUMNS)], ignore_index=True)
     curated = curated.sort_values(["include", "lap_m"], ascending=[False, True])
-    CURATED_DIR.mkdir(exist_ok=True)
+    CURATED_DIR.mkdir(parents=True, exist_ok=True)
     curated.to_csv(csv_path(region), index=False)
     return curated
 
@@ -246,5 +247,7 @@ def included(region: Region) -> gpd.GeoDataFrame:
     """Curated, included tracks joined with their ring geometry (LV95)."""
     curated = load(region)
     curated = curated[curated["include"]]
+    if not ring_cache(region).exists():  # no tracks found in the region
+        return gpd.GeoDataFrame(columns=[*COLUMNS, "geometry"], geometry="geometry", crs=LV95)
     rings = gpd.read_parquet(ring_cache(region))
     return rings.merge(curated, on=["osm_type", "osm_id"], how="inner")

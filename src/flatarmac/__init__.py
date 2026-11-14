@@ -1,7 +1,11 @@
 import argparse
 import re
+import sys
+import threading
+import time
+import webbrowser
 
-from flatarmac.config import REGIONS
+from flatarmac.config import LV95, MAX_RADIUS_KM, WGS84, Region, curated_path, regions
 
 
 def _lat_lon(text: str) -> tuple[float, float]:
@@ -21,6 +25,79 @@ def _osm_ref(text: str) -> tuple[str, int]:
     """ "relation/123" or "way/456"."""
     osm_type, osm_id = text.split("/")
     return osm_type, int(osm_id)
+
+
+def _pick_region(parser: argparse.ArgumentParser, name: str | None) -> Region:
+    """--region if given; else the only region set up (or the only one known)."""
+    known = regions()
+    if name:
+        if name not in known:
+            parser.error(f"unknown region {name!r}; known: {', '.join(known)}")
+        return known[name]
+    built = [r for r in known.values() if r.is_built] or list(known.values())
+    if len(built) > 1:
+        parser.error(f"several regions, pick one with --region: {', '.join(r.name for r in built)}")
+    return built[0]
+
+
+def _setup_region(parser: argparse.ArgumentParser, args) -> Region:
+    """Region around a place name or "lat,lon", saved so later commands find it."""
+    from pyproj import Transformer
+
+    from flatarmac import places
+
+    if re.fullmatch(r"\s*-?[\d.]+\s*,\s*-?[\d.]+\s*", args.place):
+        if not args.name:
+            parser.error("give the region a --name when setting it up around coordinates")
+        lat, lon = _lat_lon(args.place)
+        east, north = Transformer.from_crs(WGS84, LV95, always_xy=True).transform(lon, lat)
+        city = ""
+    else:
+        east, north, city = places.lookup(args.place)
+        print(f"found {city} at {east:.0f}, {north:.0f} (LV95)")
+        # The search is fuzzy: let a person check the match before a long download.
+        if sys.stdin.isatty() and input(f"set up {city}? [Y/n] ").strip().lower() not in ("", "y"):
+            parser.exit(message="nothing set up\n")
+    region = Region.around(args.name or places.slug(city), east, north, args.radius, city)
+    region.save()
+    return region
+
+
+def _step(label: str, func, *args) -> None:
+    print(f"{label}...", flush=True)
+    started = time.monotonic()
+    func(*args)
+    print(f"{label}: done in {time.monotonic() - started:.0f} s", flush=True)
+
+
+def _fetch(region: Region, keep_existing: bool = False) -> None:
+    """Download every source; with `keep_existing`, skip those already fetched (resumes setup)."""
+    from flatarmac.sources import alti3d, noise, osm, tlm, traffic
+
+    sources = [
+        ("roads (swissTLM3D, ~0.9 GB once for all regions)", tlm.fetch, "tlm_roads.parquet"),
+        ("elevation (swissALTI3D)", alti3d.fetch, "dem_2m.tif"),
+        ("OpenStreetMap stops, tracks and sidewalks", osm.fetch, "osm_walk.parquet"),
+        ("road noise", noise.fetch, "noise_night.tif"),
+        ("traffic volumes", traffic.fetch, "traffic_links.parquet"),
+    ]
+    for label, fetch, last_output in sources:
+        if keep_existing and (region.dir / last_output).exists():
+            print(f"{label}: already fetched")
+        else:
+            _step(label, fetch, region)
+
+
+def _build(region: Region) -> None:
+    from flatarmac.build import build
+
+    _step("network and costs", build, region)
+
+
+def _export(region: Region) -> None:
+    from flatarmac.export import export
+
+    _step("map layers", export, region)
 
 
 def _plan(args, region) -> None:
@@ -62,8 +139,17 @@ def _plan(args, region) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="flatarmac")
-    parser.add_argument("--region", default="zurich", choices=sorted(REGIONS))
+    parser.add_argument("--region", help="default: the only region set up")
     commands = parser.add_subparsers(dest="command", required=True)
+
+    setup = commands.add_parser(
+        "setup", help="download and build a region around a place (fetch, tracks, build, export)"
+    )
+    setup.add_argument("place", help='place name ("Bern", "Zürich Oerlikon", "8400") or lat,lon')
+    setup.add_argument(
+        "--radius", type=float, default=8, help=f"km around the place, at most {MAX_RADIUS_KM}"
+    )
+    setup.add_argument("--name", help="region name (default: from the place)")
     for name in ("fetch", "build", "export", "all"):
         commands.add_parser(name)
 
@@ -103,9 +189,21 @@ def main() -> None:
 
     serve = commands.add_parser("serve", help="web UI with route planning")
     serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
 
     args = parser.parse_args()
-    region = REGIONS[args.region]
+    if args.command == "setup":
+        from flatarmac import tracklist
+
+        region = _setup_region(parser, args)
+        _fetch(region, keep_existing=True)
+        if not curated_path("tracks", region).exists():
+            _step("running tracks", tracklist.refresh, region)
+        _build(region)
+        _export(region)
+        print(f"{region.name} is ready: run `flatarmac serve` to plan routes")
+        return
+    region = _pick_region(parser, args.region)
 
     if args.command == "plan":
         _plan(args, region)
@@ -124,21 +222,18 @@ def main() -> None:
 
         from flatarmac.server import create_app
 
-        uvicorn.run(create_app(region), host="127.0.0.1", port=args.port)
+        if not region.is_built:
+            parser.error(f"{region.name} is not built yet: run `flatarmac setup <place>` first")
+        app = create_app(region)
+        url = f"http://localhost:{args.port}"
+        print(f"flatarmac for {region.name} at {url} (Ctrl+C to stop)")
+        if not args.no_browser:
+            threading.Timer(1.0, webbrowser.open, [url]).start()
+        uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
         return
     if args.command in ("fetch", "all"):
-        from flatarmac.sources import alti3d, noise, osm, tlm, traffic
-
-        tlm.fetch(region)
-        alti3d.fetch(region)
-        osm.fetch(region)
-        noise.fetch(region)
-        traffic.fetch(region)
+        _fetch(region)
     if args.command in ("build", "all"):
-        from flatarmac.build import build
-
-        build(region)
+        _build(region)
     if args.command in ("export", "all"):
-        from flatarmac.export import export
-
-        export(region)
+        _export(region)

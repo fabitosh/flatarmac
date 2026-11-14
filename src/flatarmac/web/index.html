@@ -160,11 +160,11 @@
       <div class="legend-row"><span class="key transit"></span>Warm-up / cool-down</div>
     </details>
   </div>
-  <script>
+  <script type="module">
     const params = new URLSearchParams(location.search);
-    const region = params.get("region") || "zurich";
-    const dataUrl = (name) => `../data/${region}/web/${name}.geojson`;
-    const routesDir = `../data/${region}/routes`;
+    const region = await (await fetch("/api/region")).json();
+    const dataUrl = (name) => `/data/${region.name}/web/${name}.geojson`;
+    const routesDir = `/data/${region.name}/routes`;
     const km = (m) => (m / 1000).toFixed(1);
     const fmt = (v) => (v == null ? "–" : Number(v).toFixed(1));
     const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -198,8 +198,7 @@
     const map = new maplibregl.Map({
       container: "map",
       style: "https://vectortiles.geo.admin.ch/styles/ch.swisstopo.lightbasemap.vt/style.json",
-      center: [8.54, 47.375],
-      zoom: 13,
+      bounds: region.bbox_wgs84,
       hash: true,
     });
     map.addControl(new maplibregl.NavigationControl(), "top-right");

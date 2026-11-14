@@ -2,7 +2,6 @@
 
 import json
 import threading
-from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -10,12 +9,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from pyproj import Transformer
 
-from flatarmac.config import DATA_DIR, LV95, WGS84, Region
+from flatarmac.config import LV95, PACKAGE_DIR, WGS84, Region
 from flatarmac.output import write
 from flatarmac.pace import MAIN_ZONES, Runner, Zone, format_pace
 from flatarmac.planner import Planner, make_request
 
-WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+WEB_DIR = PACKAGE_DIR / "web"
 RESULT_NAME = "web"
 FIVE_K = r"^\d{1,2}:\d{2}$"
 
@@ -76,6 +75,8 @@ def create_app(region: Region) -> FastAPI:
             "geojson": json.loads(path.read_text()),
         }
 
-    app.mount("/data", StaticFiles(directory=DATA_DIR), name="data")
+    for sub in ("web", "routes"):
+        (region.dir / sub).mkdir(parents=True, exist_ok=True)
+        app.mount(f"/data/{region.name}/{sub}", StaticFiles(directory=region.dir / sub), name=sub)
     app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
     return app

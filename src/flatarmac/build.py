@@ -4,7 +4,7 @@ import geopandas as gpd
 import pandas as pd
 
 from flatarmac import candidates, elevation, network, roadside, stops, strokes, tracklist
-from flatarmac.config import Region
+from flatarmac.config import Region, curated_path
 from flatarmac.costs import STAIRS, CostModel, SurfaceMode, TimeOfDay, road_class
 
 STRAIGHT_DEG = 60.0
@@ -67,8 +67,8 @@ def through_cost(turns: pd.DataFrame, column: str) -> pd.Series:
 
 
 def closed_roads(region: Region) -> set[str]:
-    """TLM uuids from `curated/closures_<region>.csv`: roads mapped as open that are not."""
-    path = tracklist.CURATED_DIR / f"closures_{region.name}.csv"
+    """TLM uuids from `closures_<region>.csv`: roads mapped as open that are not."""
+    path = curated_path("closures", region)
     return set(pd.read_csv(path)["tlm_uuid"]) if path.exists() else set()
 
 

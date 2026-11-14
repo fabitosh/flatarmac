@@ -53,9 +53,9 @@ def _download(client: httpx.Client, url: str, target: Path) -> Path:
 
 def fetch(region: Region) -> Path:
     tiles = _tile_urls(region)
-    expected = (region.east_max - region.east_min) * (region.north_max - region.north_min) // 10**6
-    if len(tiles) != expected:
-        raise RuntimeError(f"expected {expected} tiles, STAC returned {len(tiles)}")
+    # Fewer near the border: the mosaic leaves the part outside Switzerland empty.
+    if not tiles:
+        raise RuntimeError(f"no swissALTI3D tiles in {region.name}: is it in Switzerland?")
 
     tile_dir = RAW_DIR / "swissalti3d"
     tile_dir.mkdir(parents=True, exist_ok=True)
