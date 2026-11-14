@@ -17,12 +17,16 @@ route network there, and opens a map in your browser. Nothing is hosted or share
    uv tool install git+https://github.com/fabitosh/flatarmac
    ```
 
-3. Set up the area around where you run, then open the map:
+3. Get the area you run in, then open the map:
 
    ```bash
-   flatarmac setup "Bern"              # a place, municipality or postcode; --radius 8 km by default
+   flatarmac download                  # prebuilt greater Zürich (~90 MB), ready in a minute
+   flatarmac setup "Bern"              # or build any other area: place, municipality or postcode
    flatarmac serve                     # opens http://localhost:8765
    ```
+
+   Greater Zürich covers Baden and Bremgarten to Wolfhausen, Horgen to north of Winterthur.
+   `setup` builds 8 km around a place by default (`--radius`, at most 15 km).
 
 `setup` takes a while the first time: the swissTLM3D road dataset (~0.9 GB download, ~3 GB on
 disk) is shared by all regions, and OpenStreetMap queries go to public Overpass servers that can be
@@ -41,10 +45,15 @@ From a checkout, `uv run flatarmac ...` keeps data in `data/` and the curated li
 ```bash
 uv run flatarmac --region zurich fetch   # roads, DEM, OSM, road noise, traffic loads
 uv run flatarmac --region zurich build   # network, gradient/surface/traffic/junction costs
-uv run flatarmac --region zurich export  # GeoJSON for the web map
 ```
 
 Outputs land in `data/<region>/` (git-ignored): `edges.parquet`, `nodes.parquet`, `turns.parquet`.
+These tables are the only copy: `serve` builds the map layers from them when it starts (open
+`edges.parquet` in QGIS for every attribute).
+
+`uv run flatarmac --region zurich bundle` packs the tables planning needs into
+`data/dist/region-zurich.tar.gz`; attached to a GitHub release, that is what `flatarmac download`
+installs.
 
 ## Route suggestions
 

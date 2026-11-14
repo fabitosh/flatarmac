@@ -5,7 +5,15 @@ import threading
 import time
 import webbrowser
 
-from flatarmac.config import LV95, MAX_RADIUS_KM, WGS84, Region, curated_path, regions
+from flatarmac.config import (
+    DATA_DIR,
+    LV95,
+    MAX_RADIUS_KM,
+    WGS84,
+    Region,
+    curated_path,
+    regions,
+)
 
 
 def _lat_lon(text: str) -> tuple[float, float]:
@@ -94,12 +102,6 @@ def _build(region: Region) -> None:
     _step("network and costs", build, region)
 
 
-def _export(region: Region) -> None:
-    from flatarmac.export import export
-
-    _step("map layers", export, region)
-
-
 def _plan(args, region) -> None:
     from flatarmac.output import route_score, write
     from flatarmac.pace import format_pace
@@ -143,14 +145,20 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
 
     setup = commands.add_parser(
-        "setup", help="download and build a region around a place (fetch, tracks, build, export)"
+        "setup", help="download and build a region around a place (fetch, tracks, build)"
     )
     setup.add_argument("place", help='place name ("Bern", "Zürich Oerlikon", "8400") or lat,lon')
     setup.add_argument(
         "--radius", type=float, default=8, help=f"km around the place, at most {MAX_RADIUS_KM}"
     )
     setup.add_argument("--name", help="region name (default: from the place)")
-    for name in ("fetch", "build", "export", "all"):
+
+    download = commands.add_parser(
+        "download", help="install a prebuilt region from the latest release instead of `setup`"
+    )
+    download.add_argument("name", nargs="?", default="zurich", help="default: zurich")
+    commands.add_parser("bundle", help="pack a built region for a release (into <data>/dist)")
+    for name in ("fetch", "build", "all"):
         commands.add_parser(name)
 
     tracks = commands.add_parser(
@@ -200,10 +208,21 @@ def main() -> None:
         if not curated_path("tracks", region).exists():
             _step("running tracks", tracklist.refresh, region)
         _build(region)
-        _export(region)
+        print(f"{region.name} is ready: run `flatarmac serve` to plan routes")
+        return
+    if args.command == "download":
+        from flatarmac import bundles
+
+        region = bundles.install(args.name)
         print(f"{region.name} is ready: run `flatarmac serve` to plan routes")
         return
     region = _pick_region(parser, args.region)
+    if args.command == "bundle":
+        from flatarmac import bundles
+
+        path = bundles.pack(region, DATA_DIR / "dist")
+        print(f"written: {path} ({path.stat().st_size / 1e6:.0f} MB)")
+        return
 
     if args.command == "plan":
         _plan(args, region)
@@ -235,5 +254,3 @@ def main() -> None:
         _fetch(region)
     if args.command in ("build", "all"):
         _build(region)
-    if args.command in ("export", "all"):
-        _export(region)

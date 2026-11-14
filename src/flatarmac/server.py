@@ -4,11 +4,12 @@ import json
 import threading
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from pyproj import Transformer
 
+from flatarmac import layers
 from flatarmac.config import LV95, PACKAGE_DIR, WGS84, Region
 from flatarmac.output import write
 from flatarmac.pace import MAIN_ZONES, Runner, Zone, format_pace
@@ -36,6 +37,11 @@ class PlanInput(BaseModel):
 def create_app(region: Region) -> FastAPI:
     planner = Planner(region)
     lock = threading.Lock()  # the planner keeps per-query state
+    map_layers = {
+        "edges": layers.to_geojson(layers.edge_scores(planner.edges)),
+        "junctions": layers.to_geojson(layers.junctions(planner.nodes)),
+        "tracks": layers.to_geojson(layers.tracks(planner.tracks)),
+    }
     to_lv95 = Transformer.from_crs(WGS84, LV95, always_xy=True)
     app = FastAPI(title="flatarmac")
 
@@ -48,6 +54,20 @@ def create_app(region: Region) -> FastAPI:
     @app.get("/api/region")
     def region_info():
         return {"name": region.name, "bbox_wgs84": region.bbox_wgs84}
+
+    @app.get("/api/layers/{name}")
+    def layer(name: str):
+        if name not in map_layers:
+            raise HTTPException(404, f"no layer {name!r}")
+        return Response(map_layers[name], media_type="application/geo+json")
+
+    @app.get("/api/edges/{edge_id}")
+    def edge(edge_id: int):
+        """Hover details for one edge (edge ids are row positions)."""
+        if not 0 <= edge_id < len(planner.edges):
+            raise HTTPException(404, f"no edge {edge_id}")
+        details = layers.edge_details(planner.edges.iloc[[edge_id]])
+        return json.loads(details.to_json(orient="records"))[0]
 
     @app.get("/api/paces")
     def paces(five_k: str = Query(..., pattern=FIVE_K)):
@@ -75,8 +95,8 @@ def create_app(region: Region) -> FastAPI:
             "geojson": json.loads(path.read_text()),
         }
 
-    for sub in ("web", "routes"):
-        (region.dir / sub).mkdir(parents=True, exist_ok=True)
-        app.mount(f"/data/{region.name}/{sub}", StaticFiles(directory=region.dir / sub), name=sub)
+    routes_dir = region.dir / "routes"
+    routes_dir.mkdir(parents=True, exist_ok=True)
+    app.mount(f"/data/{region.name}/routes", StaticFiles(directory=routes_dir), name="routes")
     app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
     return app

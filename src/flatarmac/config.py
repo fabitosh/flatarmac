@@ -76,14 +76,15 @@ class Region:
 
     @property
     def is_built(self) -> bool:
-        return (self.dir / "web" / "edges.geojson").exists()
+        return (self.dir / "tracks.parquet").exists()  # written last by the build
 
     def save(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "region.json").write_text(json.dumps(asdict(self), ensure_ascii=False) + "\n")
 
 
-ZURICH = Region("zurich", 2_675_000, 1_238_000, 2_692_000, 1_255_000, city="Zürich")
+# Greater Zürich: Baden and Bremgarten to Wolfhausen, Horgen to north of Winterthur.
+ZURICH = Region("zurich", 2_662_000, 1_230_000, 2_705_000, 1_265_000, city="Zürich")
 
 
 def regions() -> dict[str, Region]:
