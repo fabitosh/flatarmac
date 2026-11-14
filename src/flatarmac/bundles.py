@@ -5,6 +5,7 @@ A bundle holds the parquet tables planning and the map need, plus `region.json`.
 
 import io
 import json
+import re
 import tarfile
 from dataclasses import asdict
 from pathlib import Path
@@ -55,6 +56,8 @@ def pack(region: Region, out_dir: Path) -> Path:
 
 def install(region_name: str) -> Region:
     """Download the region's bundle from the latest release and unpack it into the data dir."""
+    if not re.fullmatch(r"[a-z0-9-]+", region_name):
+        raise ValueError(f"not a region name: {region_name!r}")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     partial = DATA_DIR / f".{asset_name(region_name)}.part"
     url = f"{RELEASES}/{asset_name(region_name)}"

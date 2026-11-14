@@ -16,7 +16,7 @@ OVERPASS_URLS = [
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
 ]
-USER_AGENT = "flatarmac/0.1 (personal running route research)"
+USER_AGENT = "flatarmac/0.2 (running route planner, github.com/fabitosh/flatarmac)"
 OVERPASS_RETRY_WAITS_S = (0, 30, 120)
 
 STOP_NODE_FILTERS = [

@@ -93,7 +93,7 @@ folder's `curated/` when installed. `setup` fills it from OpenStreetMap for a ne
 `flatarmac build` after editing. To pick up new OSM tracks:
 
 ```bash
-uv run flatarmac tracks --discover          # query Overpass for leisure=track (needs a built region)
+uv run flatarmac tracks --discover          # query Overpass for leisure=track (after fetch)
 uv run flatarmac tracks --add relation/123  # add one by OSM id
 ```
 

@@ -67,6 +67,10 @@ def _setup_region(parser: argparse.ArgumentParser, args) -> Region:
         if sys.stdin.isatty() and input(f"set up {city}? [Y/n] ").strip().lower() not in ("", "y"):
             parser.exit(message="nothing set up\n")
     region = Region.around(args.name or places.slug(city), east, north, args.radius, city)
+    # Same name and bounds resumes an interrupted setup; other bounds would mix two areas' data.
+    existing = regions().get(region.name)
+    if existing and existing.bbox_lv95 != region.bbox_lv95:
+        parser.error(f"a region {region.name!r} with other bounds exists: pick another --name")
     region.save()
     return region
 
@@ -162,7 +166,7 @@ def main() -> None:
         commands.add_parser(name)
 
     tracks = commands.add_parser(
-        "tracks", help="add newly found tracks to curated/tracks_<region>.csv (after build)"
+        "tracks", help="add newly found tracks to tracks_<region>.csv (after fetch)"
     )
     tracks.add_argument("--discover", action="store_true", help="query Overpass for tracks first")
     tracks.add_argument("--add", type=_osm_ref, action="append", default=[], help="relation/123")
@@ -242,7 +246,10 @@ def main() -> None:
         from flatarmac.server import create_app
 
         if not region.is_built:
-            parser.error(f"{region.name} is not built yet: run `flatarmac setup <place>` first")
+            parser.error(
+                f"{region.name} is not built yet: run `flatarmac download` (greater Zürich) "
+                "or `flatarmac setup <place>` first"
+            )
         app = create_app(region)
         url = f"http://localhost:{args.port}"
         print(f"flatarmac for {region.name} at {url} (Ctrl+C to stop)")
