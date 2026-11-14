@@ -160,11 +160,11 @@
       <div class="legend-row"><span class="key transit"></span>Warm-up / cool-down</div>
     </details>
   </div>
-  <script>
+  <script type="module">
     const params = new URLSearchParams(location.search);
-    const region = params.get("region") || "zurich";
-    const dataUrl = (name) => `../data/${region}/web/${name}.geojson`;
-    const routesDir = `../data/${region}/routes`;
+    const region = await (await fetch("/api/region")).json();
+    const dataUrl = (name) => `/api/layers/${name}`;
+    const routesDir = `/data/${region.name}/routes`;
     const km = (m) => (m / 1000).toFixed(1);
     const fmt = (v) => (v == null ? "–" : Number(v).toFixed(1));
     const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -198,8 +198,7 @@
     const map = new maplibregl.Map({
       container: "map",
       style: "https://vectortiles.geo.admin.ch/styles/ch.swisstopo.lightbasemap.vt/style.json",
-      center: [8.54, 47.375],
-      zoom: 13,
+      bounds: region.bbox_wgs84,
       hash: true,
     });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
@@ -516,10 +515,20 @@
       yes: "yes", no: "none", pedestrian: "pedestrian street", unknown: "not mapped", not_a_road: "–",
     };
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "280px" });
-    map.on("mousemove", "edges", (e) => {
+    // The map only carries scores; the rest comes from the server once per edge.
+    const edgeDetails = new Map();
+    const details = (id) => {
+      if (!edgeDetails.has(id)) edgeDetails.set(id, fetch(`/api/edges/${id}`).then((r) => r.json()));
+      return edgeDetails.get(id);
+    };
+    let hovered = null; // edge under the pointer, so a late answer for another one is dropped
+    map.on("mousemove", "edges", async (e) => {
       if (map.queryRenderedFeatures(e.point, { layers: TRACK_LAYERS }).length) return;
       map.getCanvas().style.cursor = "crosshair";
-      const p = e.features[0].properties;
+      const scores = e.features[0].properties;
+      hovered = scores.edge_id;
+      const p = { ...(await details(scores.edge_id)), ...scores };
+      if (hovered !== scores.edge_id) return;
       const num = (v) => (v == null || v === "null" ? null : v);
       const rows = [
         ["Score", `${p[`score_${mode}_${time}`]} / 100`],
@@ -545,6 +554,7 @@
       ).addTo(map);
     });
     map.on("mousemove", "junctions", (e) => {
+      hovered = null;
       const p = e.features[0].properties;
       popup.setLngLat(e.lngLat).setHTML(
         `<strong>Junction</strong><div class="muted">${p.control === "null" ? "no OSM control" : p.control} · degree ${p.degree}</div>
@@ -552,6 +562,7 @@
       ).addTo(map);
     });
     map.on("mousemove", TRACK_LAYERS, (e) => {
+      hovered = null;
       map.getCanvas().style.cursor = "pointer";
       const p = e.features[0].properties;
       popup.setLngLat(e.lngLat).setHTML(
@@ -560,7 +571,7 @@
       ).addTo(map);
     });
     for (const layer of ["edges", "junctions", ...TRACK_LAYERS]) {
-      map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; popup.remove(); });
+      map.on("mouseleave", layer, () => { hovered = null; map.getCanvas().style.cursor = ""; popup.remove(); });
     }
   </script>
 </body>

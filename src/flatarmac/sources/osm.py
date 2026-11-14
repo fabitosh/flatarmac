@@ -1,6 +1,8 @@
 """OpenStreetMap features that interrupt a run (signals, crossings, barriers), running tracks, and
 what lies beside a road (sidewalks, pedestrian areas, shops)."""
 
+import time
+
 import geopandas as gpd
 import httpx
 import pandas as pd
@@ -14,7 +16,8 @@ OVERPASS_URLS = [
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
 ]
-USER_AGENT = "flatarmac/0.1 (personal running route research)"
+USER_AGENT = "flatarmac/0.2 (running route planner, github.com/fabitosh/flatarmac)"
+OVERPASS_RETRY_WAITS_S = (0, 30, 120)
 
 STOP_NODE_FILTERS = [
     '["highway"="traffic_signals"]',
@@ -68,16 +71,19 @@ def _lap_ring(element: dict) -> LineString | None:
 
 
 def _overpass(query: str) -> list[dict]:
+    """Public Overpass servers are often busy: try each, then wait and go round again."""
     errors = []
-    for url in OVERPASS_URLS:
-        try:
-            response = httpx.post(
-                url, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=240
-            )
-            response.raise_for_status()
-            return response.json()["elements"]
-        except (httpx.HTTPError, ValueError) as error:
-            errors.append(f"{url}: {error}")
+    for attempt, wait_s in enumerate(OVERPASS_RETRY_WAITS_S):
+        time.sleep(wait_s)
+        for url in OVERPASS_URLS:
+            try:
+                response = httpx.post(
+                    url, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=240
+                )
+                response.raise_for_status()
+                return response.json()["elements"]
+            except (httpx.HTTPError, ValueError) as error:
+                errors.append(f"round {attempt + 1}, {url}: {error}")
     raise RuntimeError("all Overpass endpoints failed:\n" + "\n".join(errors))
 
 

@@ -1,7 +1,7 @@
 [project]
 name = "flatarmac"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Find flat, uninterrupted running routes in Switzerland"
 readme = "README.md"
 authors = [
     { name = "Fabio Meier", email = "fabitosh@gmail.com" }
@@ -12,6 +12,7 @@ dependencies = [
     "geopandas>=1.2.0",
     "httpx>=0.28.1",
     "numpy>=2.5.4",
+    "platformdirs>=4.14.5",
     "polars>=2.1.0",
     "pyarrow>=26.0.0",
     "pyogrio>=0.13.0",
