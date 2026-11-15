@@ -14,6 +14,7 @@ import httpx
 
 from flatarmac.config import DATA_DIR, Region
 
+# `download` looks only in the latest release: attach the region bundles to every release.
 RELEASES = "https://github.com/fabitosh/flatarmac/releases/latest/download"
 TABLES = ["edges.parquet", "nodes.parquet", "turns.parquet", "strokes.parquet", "tracks.parquet"]
 ATTRIBUTION = """\
